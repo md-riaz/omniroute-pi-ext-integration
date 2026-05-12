@@ -5,15 +5,12 @@
  * pi (https://github.com/earendil-works/pi/tree/main/packages/coding-agent).
  *
  * Features:
- *   - Status bar shows which model actually served each response (via call logs)
- *   - Warns on startup if any provider connections need re-authentication
- *   - /omni commands for managing combos, providers, and model sync
+ *   - Status bar shows which model actually served each response (via call logs when available)
+ *   - Public API setup and model sync
+ *   - Public-only mode for remote OmniRoute servers that block management endpoints
  *
  * Commands:
- *   /omni                  — Status dashboard: health, combos, provider issues
- *   /omni combos           — Manage combos: edit models, create, delete
- *   /omni providers        — Browse providers, models & add new ones
- *   /omni health           — Call log analysis + config diagnostics & auto-fix
+ *   /omni                  — Status dashboard
  *   /omni sync             — Sync all OmniRoute models to pi's Ctrl+P picker
  *   /omni setup            — Setup OmniRoute URL and API key
  *   /omni dashboard        — Show OmniRoute web dashboard URL
@@ -797,9 +794,9 @@ export default function (pi: ExtensionAPI) {
 	// ── /omni command ──
 
 	pi.registerCommand("omni", {
-		description: "OmniRoute: /omni [combos|providers|health|limits|sync|setup|dashboard]",
+		description: "OmniRoute: /omni [sync|setup|dashboard]",
 		getArgumentCompletions(prefix: string) {
-			return ["combos", "providers", "health", "limits", "sync", "setup", "dashboard"]
+			return ["sync", "setup", "dashboard"]
 				.filter((s) => s.startsWith(prefix))
 				.map((s) => ({ value: s, label: s }));
 		},
@@ -850,11 +847,8 @@ export default function (pi: ExtensionAPI) {
 						"",
 						"─── Commands ───",
 						"",
-						"  /omni combos          Manage combos: edit, create, delete",
-						"  /omni providers       Browse providers, models & add new ones",
-						"  /omni health          Call log analysis + config diagnostics & auto-fix",
 						"  /omni sync            Sync models to Ctrl+P picker",
-						"  /omni setup-key       Create OmniRoute API key & save to models.json",
+						"  /omni setup           Save OmniRoute URL and API key",
 						"  /omni dashboard       Dashboard URL",
 					);
 
@@ -882,7 +876,7 @@ export default function (pi: ExtensionAPI) {
 
 			// ──────────────── /omni combos ────────────────
 
-			if (sub === "combos") {
+			if (sub === "__disabled_combos__") {
 				ctx.ui.notify(managementOnlyMessage("/omni combos"), "warning");
 				return;
 				let browsing = true;
@@ -1047,7 +1041,7 @@ export default function (pi: ExtensionAPI) {
 
 			// ──────────────── /omni providers ────────────────
 
-			if (sub === "providers") {
+			if (sub === "__disabled_providers__") {
 				ctx.ui.notify(managementOnlyMessage("/omni providers"), "warning");
 				return;
 				const [conns, nodes] = await Promise.all([listConnections(), listProviderNodes()]);
@@ -1204,7 +1198,7 @@ export default function (pi: ExtensionAPI) {
 
 			// ──────────────── /omni health (merged log-review + doctor) ────────────────
 
-			if (sub === "health" || sub === "log-review" || sub === "logreview" || sub === "doctor" || sub === "doc") {
+			if (sub === "__disabled_health__") {
 				ctx.ui.notify(managementOnlyMessage("/omni health"), "warning");
 				return;
 				ctx.ui.notify("Running health check…", "info");
@@ -1576,7 +1570,7 @@ export default function (pi: ExtensionAPI) {
 
 			// ──────────────── /omni limits ────────────────
 
-			if (sub === "limits" || sub === "quota" || sub === "usage") {
+			if (sub === "__disabled_limits__") {
 				ctx.ui.notify(managementOnlyMessage("/omni limits"), "warning");
 				return;
 				try {
@@ -1622,7 +1616,7 @@ export default function (pi: ExtensionAPI) {
 			// ──────────────── Unknown ────────────────
 
 			ctx.ui.notify(
-				`Unknown: /omni ${sub}\n\nAvailable: combos, providers, health, limits, sync, setup-key, dashboard`,
+				`Unknown: /omni ${sub}\n\nAvailable: sync, setup, dashboard`,
 				"warning"
 			);
 		},
