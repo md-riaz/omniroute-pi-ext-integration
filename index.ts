@@ -88,9 +88,14 @@ function getApiKey(): string {
 }
 
 async function api(path: string, opts?: RequestInit): Promise<any> {
+	const apiKey = getApiKey();
 	const res = await fetch(`${OMNI_URL}${path}`, {
 		...opts,
-		headers: { "Content-Type": "application/json", ...(opts?.headers || {}) },
+		headers: {
+			"Content-Type": "application/json",
+			...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+			...(opts?.headers || {}),
+		},
 		signal: AbortSignal.timeout(10000),
 	});
 	if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
