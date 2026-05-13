@@ -1,7 +1,7 @@
 {
   "name": "omniroute-pi-ext-integration",
   "version": "1.0.0",
-  "description": "Pi Coding Agent extension for OmniRoute — manage combos, browse providers, track limits, and see which model actually served each response in the status bar",
+  "description": "Pi Coding Agent extension for OmniRoute — view combos, browse providers, and sync models with enriched metadata (context windows, max tokens, reasoning, and vision) to the Ctrl+P picker",
   "keywords": [
     "pi-package",
     "pi-coding-agent",
