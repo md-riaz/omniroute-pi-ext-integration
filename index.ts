@@ -609,6 +609,11 @@ async function getAllModelsFromOmniRoute(): Promise<{ id: string; name: string; 
 					owned_by: m.owned_by,
 				};
 
+				const apiType = id.includes("gemini") ? "google-generative-ai" :
+						(id.includes("claude") || id.includes("sonnet") || id.includes("opus") || id.includes("haiku")) ? "anthropic-messages" :
+						undefined;
+
+				if (apiType) res.api = apiType;
 				if (m.context_length || m.max_input_tokens) res.contextWindow = m.context_length || m.max_input_tokens;
 				if (m.max_output_tokens) res.maxTokens = m.max_output_tokens;
 				if (m.capabilities?.reasoning || m.capabilities?.thinking) res.reasoning = true;
