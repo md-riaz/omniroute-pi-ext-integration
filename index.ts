@@ -609,6 +609,12 @@ async function getAllModelsFromOmniRoute(): Promise<{ id: string; name: string; 
 					owned_by: m.owned_by,
 				};
 
+				// Claude models MUST use Anthropic format to avoid 400 errors
+				const isClaude = id.includes("claude") || id.includes("sonnet") || id.includes("opus") || id.includes("haiku");
+				if (isClaude) {
+					res.api = "anthropic-messages";
+				}
+
 				if (m.context_length || m.max_input_tokens) res.contextWindow = m.context_length || m.max_input_tokens;
 				if (m.max_output_tokens) res.maxTokens = m.max_output_tokens;
 				if (m.capabilities?.reasoning || m.capabilities?.thinking) res.reasoning = true;
