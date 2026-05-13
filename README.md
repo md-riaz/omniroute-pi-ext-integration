@@ -8,8 +8,9 @@ Connect to your local or remote OmniRoute server, browse models, manage combos, 
 
 - 🔮 **Wizard-Based Setup**: Just run `/omni setup` inside Pi. No manual JSON editing needed.
 - ⚡ **Pure HTTP Client**: Works securely and seamlessly whether your OmniRoute server is running locally on `localhost:20128` or hosted on a remote VPS.
+- 🔄 **Combo & Model Sync**: Instantly push all OmniRoute combos and available models into Pi’s `Ctrl+P` model picker with full metadata (context windows, max tokens, reasoning support, and vision capabilities).
+- 🧬 **Smart Sorting**: Syncing organizes your model list by provider/group (`owned_by`) for a cleaner `Ctrl+P` experience.
 - 📊 **Real-time Routing Feedback**: Status bar dynamically shows which model *actually* served each response.
-- 🔄 **Combo & Model Sync**: Instantly push all OmniRoute combos and available models into Pi’s `Ctrl+P` model picker.
 - 🛠️ **Diagnostics & Health**: Spot expired tokens, connection failures, or disconnected providers right when Pi starts.
 - 📉 **Quota Management**: Live usage tracking mapped directly to OmniRoute's global quota endpoints.
 

@@ -580,8 +580,16 @@ async function getLastCallLog(): Promise<CallLog | null> {
 
 // ────────────────────────── model sync ──────────────────────────
 
-async function getAllModelsFromOmniRoute(): Promise<{ id: string; name: string }[]> {
-	const results: { id: string; name: string }[] = [];
+async function getAllModelsFromOmniRoute(): Promise<{ id: string; name: string; contextWindow?: number; maxTokens?: number; reasoning?: boolean; input?: string[] }[]> {
+	const results: {
+		id: string;
+		name: string;
+		owned_by?: string;
+		contextWindow?: number;
+		maxTokens?: number;
+		reasoning?: boolean;
+		input?: string[];
+	}[] = [];
 
 	// Models from built-in providers
 	try {
@@ -589,7 +597,22 @@ async function getAllModelsFromOmniRoute(): Promise<{ id: string; name: string }
 		const models = data?.data || [];
 		for (const m of models) {
 			const id = typeof m === "string" ? m : m.id;
-			if (id) results.push({ id, name: humanName(id) });
+			if (id) {
+				const inputModalities = m.input_modalities || [];
+				const input = inputModalities.length > 0
+					? inputModalities.filter((mod: string) => mod === "text" || mod === "image")
+					: undefined;
+
+				results.push({
+					id,
+					name: humanName(id),
+					owned_by: m.owned_by,
+					contextWindow: m.context_length || m.max_input_tokens,
+					maxTokens: m.max_output_tokens,
+					reasoning: !!(m.capabilities?.reasoning || m.capabilities?.thinking),
+					input: input && input.length > 0 ? input : undefined,
+				});
+			}
 		}
 	} catch {}
 
@@ -603,7 +626,7 @@ async function getAllModelsFromOmniRoute(): Promise<{ id: string; name: string }
 				for (const modelId of models) {
 					const prefixedId = `${node.prefix}/${modelId}`;
 					if (!results.find((r) => r.id === prefixedId)) {
-						results.push({ id: prefixedId, name: humanName(prefixedId) });
+						results.push({ id: prefixedId, name: humanName(prefixedId), owned_by: node.prefix });
 					}
 				}
 			}
@@ -615,12 +638,20 @@ async function getAllModelsFromOmniRoute(): Promise<{ id: string; name: string }
 		const combos = await listCombos();
 		for (const c of combos) {
 			if (!results.find((r) => r.id === c.name)) {
-				results.push({ id: c.name, name: c.name });
+				results.push({ id: c.name, name: c.name, owned_by: "combo" });
 			}
 		}
 	} catch {}
 
-	return results.sort((a, b) => a.name.localeCompare(b.name));
+	return results
+		.sort((a, b) => {
+			// Sort by owned_by first, then by name
+			const ownedA = a.owned_by || "";
+			const ownedB = b.owned_by || "";
+			if (ownedA !== ownedB) return ownedA.localeCompare(ownedB);
+			return a.name.localeCompare(b.name);
+		})
+		.map(({ owned_by, ...rest }) => rest);
 }
 
 function humanName(id: string): string {
