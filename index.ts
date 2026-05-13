@@ -603,20 +603,18 @@ async function getAllModelsFromOmniRoute(): Promise<{ id: string; name: string; 
 					? inputModalities.filter((mod: string) => mod === "text" || mod === "image")
 					: undefined;
 
-				const apiType = id.includes("gemini") ? "google-generative-ai" :
-						(id.includes("claude") || id.includes("sonnet") || id.includes("opus") || id.includes("haiku")) ? "anthropic-messages" :
-						undefined;
-
-				results.push({
+				const res: any = {
 					id,
 					name: humanName(id),
 					owned_by: m.owned_by,
-					api: apiType as any,
-					contextWindow: m.context_length || m.max_input_tokens,
-					maxTokens: m.max_output_tokens,
-					reasoning: !!(m.capabilities?.reasoning || m.capabilities?.thinking),
-					input: input && input.length > 0 ? input : undefined,
-				});
+				};
+
+				if (m.context_length || m.max_input_tokens) res.contextWindow = m.context_length || m.max_input_tokens;
+				if (m.max_output_tokens) res.maxTokens = m.max_output_tokens;
+				if (m.capabilities?.reasoning || m.capabilities?.thinking) res.reasoning = true;
+				if (input && input.length > 0) res.input = input;
+
+				results.push(res);
 			}
 		}
 	} catch {}
@@ -631,14 +629,10 @@ async function getAllModelsFromOmniRoute(): Promise<{ id: string; name: string; 
 				for (const modelId of models) {
 					const prefixedId = `${node.prefix}/${modelId}`;
 					if (!results.find((r) => r.id === prefixedId)) {
-						const apiType = prefixedId.includes("gemini") ? "google-generative-ai" :
-								(prefixedId.includes("claude") || prefixedId.includes("sonnet") || prefixedId.includes("opus") || prefixedId.includes("haiku")) ? "anthropic-messages" :
-								undefined;
 						results.push({
 							id: prefixedId,
 							name: humanName(prefixedId),
 							owned_by: node.prefix,
-							api: apiType as any
 						});
 					}
 				}
@@ -651,18 +645,17 @@ async function getAllModelsFromOmniRoute(): Promise<{ id: string; name: string; 
 		const combos = await listCombos();
 		for (const c of combos) {
 			if (!results.find((r) => r.id === c.name)) {
-				results.push({ id: c.name, name: c.name, owned_by: "combo" });
+				results.push({ id: c.name, name: c.name, owned_by: "0_combo" });
 			}
 		}
 	} catch {}
 
 	return results
 		.sort((a, b) => {
-			// Sort by owned_by first, then by name
-			const ownedA = a.owned_by || "";
-			const ownedB = b.owned_by || "";
+			const ownedA = a.owned_by || "zz";
+			const ownedB = b.owned_by || "zz";
 			if (ownedA !== ownedB) return ownedA.localeCompare(ownedB);
-			return a.name.localeCompare(b.name);
+			return a.id.localeCompare(b.id);
 		})
 		.map(({ owned_by, ...rest }) => rest);
 }
