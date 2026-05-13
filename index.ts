@@ -603,10 +603,15 @@ async function getAllModelsFromOmniRoute(): Promise<{ id: string; name: string; 
 					? inputModalities.filter((mod: string) => mod === "text" || mod === "image")
 					: undefined;
 
+				const apiType = id.includes("gemini") ? "google-generative-ai" :
+						(id.includes("claude") || id.includes("sonnet") || id.includes("opus") || id.includes("haiku")) ? "anthropic-messages" :
+						undefined;
+
 				results.push({
 					id,
 					name: humanName(id),
 					owned_by: m.owned_by,
+					api: apiType as any,
 					contextWindow: m.context_length || m.max_input_tokens,
 					maxTokens: m.max_output_tokens,
 					reasoning: !!(m.capabilities?.reasoning || m.capabilities?.thinking),
@@ -626,7 +631,15 @@ async function getAllModelsFromOmniRoute(): Promise<{ id: string; name: string; 
 				for (const modelId of models) {
 					const prefixedId = `${node.prefix}/${modelId}`;
 					if (!results.find((r) => r.id === prefixedId)) {
-						results.push({ id: prefixedId, name: humanName(prefixedId), owned_by: node.prefix });
+						const apiType = prefixedId.includes("gemini") ? "google-generative-ai" :
+								(prefixedId.includes("claude") || prefixedId.includes("sonnet") || prefixedId.includes("opus") || prefixedId.includes("haiku")) ? "anthropic-messages" :
+								undefined;
+						results.push({
+							id: prefixedId,
+							name: humanName(prefixedId),
+							owned_by: node.prefix,
+							api: apiType as any
+						});
 					}
 				}
 			}
