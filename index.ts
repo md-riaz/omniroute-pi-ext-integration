@@ -174,8 +174,10 @@ function isPiChatModel(model: any): boolean {
 }
 
 /** Detect web-synced models whose native function calling is unreliable/missing. */
-function isWebSyncedModel(id: string, name?: string): boolean {
-	return `${id} ${name || ""}`.toLowerCase().includes("-web");
+function isWebSyncedModel(...markers: unknown[]): boolean {
+	return markers
+		.filter((marker): marker is string => typeof marker === "string")
+		.some((marker) => marker.toLowerCase().includes("-web"));
 }
 
 /** Read per-model tool_calling:false from models.json; Pi strips this custom field from runtime Model. */
@@ -183,7 +185,7 @@ function modelConfigToolCallingFalse(model: Pick<Model<any>, "id" | "provider">)
 	try {
 		const provider = readModelsJson()?.providers?.[model.provider];
 		const configured = (provider?.models || []).find((m: any) => m?.id === model.id);
-		return configured?.tool_calling === false;
+		return configured?.tool_calling === false || isWebSyncedModel(configured?.id, configured?.name, configured?.owned_by, configured?.provider);
 	} catch {
 		return false;
 	}
@@ -193,7 +195,7 @@ function modelConfigToolCallingFalse(model: Pick<Model<any>, "id" | "provider">)
 function shouldUsePromptTools(model: Pick<Model<any>, "id" | "name" | "provider">): boolean {
 	return (
 		modelConfigToolCallingFalse(model) ||
-		isWebSyncedModel(model.id, model.name) ||
+		isWebSyncedModel(model.id, model.name, model.provider) ||
 		`${model.provider || ""}`.toLowerCase().includes("-web")
 	);
 }
@@ -503,7 +505,7 @@ async function getAllModelsFromOmniRoute(): Promise<SyncedModel[]> {
 			api: OMNI_PROMPT_TOOLS_API,
 		};
 
-		if (isWebSyncedModel(id, m.name)) synced.tool_calling = false;
+		if (isWebSyncedModel(id, m.name, m.owned_by, m.provider)) synced.tool_calling = false;
 
 		const input = normalizeModalities(m.input_modalities ?? m.input);
 		synced.input = input.length > 0 ? input : ["text"];

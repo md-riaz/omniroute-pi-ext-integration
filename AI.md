@@ -82,7 +82,7 @@ Prompt tool mode triggers when:
 "tool_calling": false
 ```
 
-2. or model id/name/provider contains:
+2. or model id/name/provider/OmniRoute `owned_by` contains:
 
 ```text
 -web
@@ -182,7 +182,7 @@ import ok
 
 ## Pitfalls
 
-- Do not rely only on Pi runtime `Model` for `tool_calling`; custom fields are stripped.
+- Do not rely only on Pi runtime `Model` for `tool_calling`; custom fields and OmniRoute `owned_by` are stripped.
 - Do not set web/chat-only models to a separate provider; keep `/model` workflow unchanged.
 - Do not send native `tools` to chat-only web-synced models; use prompt mode with `tools: []`.
 - `streamWithPromptTools()` is buffered, not token-streamed. It waits for full response so it can parse tool blocks safely.

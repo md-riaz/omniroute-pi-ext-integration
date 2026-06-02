@@ -76,7 +76,7 @@ For model sync changes:
 
 - `/omni setup` saves URL/API key.
 - `/omni sync` writes models to `~/.pi/agent/models.json`.
-- Web-synced models get `tool_calling:false`.
+- Web-synced models get `tool_calling:false` even when `-web` only appears in OmniRoute `owned_by`/provider metadata.
 - Normal models do not get forced into prompt mode.
 
 For prompt tool changes:

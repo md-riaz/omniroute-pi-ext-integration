@@ -47,7 +47,7 @@ Saved provider shape:
   -> filter non-chat/image-only models
   -> normalize input modalities
   -> copy context/max token/reasoning metadata
-  -> mark -web models as tool_calling:false
+  -> mark models with -web in id/name/provider/owned_by as tool_calling:false
   -> write config.providers.omni.models
   -> refresh Pi model registry
   -> re-register omni provider
@@ -102,8 +102,8 @@ So `modelConfigToolCallingFalse()` reads raw `models.json` to recover that field
 ```ts
 promptTools =
   modelConfigToolCallingFalse(model) ||
-  id/name contains "-web" ||
-  provider contains "-web"
+  id/name/provider contains "-web" ||
+  synced raw owned_by/provider marker contained "-web"
 ```
 
 If `promptTools` is false, native OpenAI-compatible tool calling is used.

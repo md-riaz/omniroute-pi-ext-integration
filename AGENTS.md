@@ -47,7 +47,7 @@ omni
 
 Chat-only models should use prompt-emulated tools automatically when:
 
-- model id/name/provider contains `-web`
+- model id/name/provider or OmniRoute `owned_by` contains `-web`
 - or raw `models.json` model entry has `tool_calling:false`
 
 Do not rely only on Pi runtime `Model` for custom metadata. Pi strips unknown fields; use raw `models.json` when needed.

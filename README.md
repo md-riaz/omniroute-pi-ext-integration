@@ -95,7 +95,7 @@ Tool results are fed back in history as text:
 
 Prompt tool mode is enabled when either condition is true:
 
-1. The model ID/name/provider contains `-web`.
+1. The model ID/name/provider/OmniRoute `owned_by` marker contains `-web` during sync.
 2. The synced `models.json` model entry contains:
 
 ```json
@@ -135,7 +135,7 @@ The extension routes automatically:
 
 | Model kind | Detection | Tool mode |
 |---|---|---|
-| Web-synced model | ID/name/provider contains `-web` | Prompt-emulated tools |
+| Web-synced model | ID/name/provider or OmniRoute `owned_by` contains `-web` | Prompt-emulated tools |
 | Explicit chat-only model | `tool_calling: false` in `models.json` | Prompt-emulated tools |
 | Normal model | No fallback marker | Native tools |
 
