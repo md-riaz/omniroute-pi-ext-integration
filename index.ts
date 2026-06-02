@@ -92,6 +92,7 @@ type SyncedModel = {
 	reasoning?: boolean;
 	input?: string[];
 	api?: string;
+	tool_calling?: boolean;
 };
 
 function normalizeModalities(value: unknown): string[] {
@@ -112,6 +113,10 @@ function isPiChatModel(model: any): boolean {
 	const output = normalizeModalities(model.output_modalities ?? model.output);
 	if (String(model.type || "chat").toLowerCase() === "image") return false;
 	return output.length === 0 || output.includes("text");
+}
+
+function isWebSyncedModel(id: string, name?: string): boolean {
+	return `${id} ${name || ""}`.toLowerCase().includes("-web");
 }
 
 function upsertSyncedModel(models: SyncedModel[], next: SyncedModel): void {
@@ -148,6 +153,8 @@ async function getAllModelsFromOmniRoute(): Promise<SyncedModel[]> {
 			owned_by: m.owned_by,
 			api: "openai-completions",
 		};
+
+		if (isWebSyncedModel(id, m.name)) synced.tool_calling = false;
 
 		const input = normalizeModalities(m.input_modalities ?? m.input);
 		synced.input = input.length > 0 ? input : ["text"];
