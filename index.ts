@@ -206,6 +206,7 @@ function shouldUsePromptTools(model: Pick<Model<any>, "id" | "name" | "provider"
 }
 
 const PROMPT_TOOL_FULL_REFRESH_TURNS = 6;
+const PROMPT_TOOL_MAX_STATE_ENTRIES = 1000;
 
 type PromptToolProtocolState = {
 	toolSignature: string;
@@ -217,7 +218,6 @@ type PromptToolProtocolState = {
 
 type PromptToolProtocolSelection = {
 	text: string;
-	sentFull: boolean;
 };
 
 /**
@@ -308,6 +308,14 @@ function renderFullToolProtocol(tools: Tool[], protocolId: string): string {
  * every PROMPT_TOOL_FULL_REFRESH_TURNS turns, whenever the tool set changes, or after parse
  * confusion so chat-only web models can recover when they forget exact rules/arguments.
  */
+function compactToolReminderHint(tool: Tool): string {
+	const parameters = compactToolParameters(tool.parameters);
+	const cappedParameters = parameters.length > 300
+		? `${parameters.slice(0, 300)}...`
+		: parameters;
+	return `${tool.name} parameters=${cappedParameters}`;
+}
+
 function renderToolProtocolReminder(tools: Tool[], protocolId: string): string {
 	return [
 		"# Pi prompt tools reminder",
@@ -315,7 +323,8 @@ function renderToolProtocolReminder(tools: Tool[], protocolId: string): string {
 		"Tool call format: <tool_call>{\"name\":\"tool_name\",\"arguments\":{}}</tool_call>",
 		"Tool calls must be standalone assistant messages: no prose/markdown/extra text.",
 		"Extra text beside <tool_call> means no tool executes.",
-		`Available tool names: ${tools.map((tool) => tool.name).join(", ")}`,
+		"Compact argument hints:",
+		...tools.map(compactToolReminderHint),
 	].join("\n");
 }
 
@@ -336,6 +345,13 @@ function selectPromptToolProtocol(
 		: true;
 	const sendFull = toolSetChanged || refreshDue || current?.forceFullNextTurn === true;
 
+	// Pi extension hosts can live for many sessions. Bound the process-local state map so
+	// refresh counters remain useful without growing indefinitely across old sessions.
+	if (promptToolProtocolStates.size >= PROMPT_TOOL_MAX_STATE_ENTRIES && !promptToolProtocolStates.has(key)) {
+		const oldestKey = promptToolProtocolStates.keys().next().value;
+		if (oldestKey !== undefined) promptToolProtocolStates.delete(oldestKey);
+	}
+
 	promptToolProtocolStates.set(key, {
 		toolSignature: signature,
 		protocolId,
@@ -348,7 +364,6 @@ function selectPromptToolProtocol(
 		text: sendFull
 			? renderFullToolProtocol(tools, protocolId)
 			: renderToolProtocolReminder(tools, protocolId),
-		sentFull: sendFull,
 	};
 }
 
@@ -451,7 +466,8 @@ function parseToolCalls(text: string): ParseToolCallsResult {
 	const original = text.trim();
 	if (!original) return { prose: "", calls, errors, mixedToolCallText: false };
 
-	const hasToolCallText = /<tool_call>[\s\S]*?<\/tool_call>/.test(text);
+	const openIdx = text.indexOf("<tool_call>");
+	const hasToolCallText = openIdx !== -1 && text.indexOf("</tool_call>", openIdx) !== -1;
 	TOOL_CALL_RE.lastIndex = 0;
 	const remainder = text.replace(TOOL_CALL_RE, "").trim();
 	if (remainder) {

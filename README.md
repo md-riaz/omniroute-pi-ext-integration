@@ -98,7 +98,7 @@ The model is taught this wire format as a standalone assistant message:
 
 Prompt tool mode only executes tool calls when the entire assistant message is one or more `<tool_call>` blocks plus whitespace. If the model includes prose, examples, or any extra text alongside `<tool_call>`, the extension treats the whole response as normal text and does not execute tools. This prevents accidental tool calls from documentation snippets or mixed explanatory answers.
 
-To reduce context usage for web/chat-only models, the prompt-tool protocol is compact and refreshed periodically. The first prompt-tool request sends the full compact protocol with all active tools and minified parameter schemas. Later requests send only a tiny reminder with tool names, then the full protocol is sent again every 6 prompt-tool turns, whenever the active tool set changes, or after malformed/mixed tool-call output. The extension still exposes the full active Pi tool set in prompt-tool mode; it does not filter out extension/custom tools.
+To reduce context usage for web/chat-only models, the prompt-tool protocol is compact and refreshed periodically. The first prompt-tool request sends the full compact protocol with all active tools and minified parameter schemas. Later requests send a tiny reminder with compact argument hints, then the full protocol is sent again every 6 prompt-tool turns, whenever the active tool set changes, or after malformed/mixed tool-call output. The extension still exposes the full active Pi tool set in prompt-tool mode; it does not filter out extension/custom tools.
 
 Tool results are fed back in history as text:
 

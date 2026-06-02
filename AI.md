@@ -64,7 +64,7 @@ Real HTTP calls still use Pi's built-in OpenAI-compatible provider:
 const UNDERLYING_API = "openai-completions";
 ```
 
-Native mode passes tools normally. Prompt mode strips native tools and renders tool schemas as text.
+Native mode passes tools normally. Prompt mode strips native tools and injects a text prompt-tool protocol into the outbound system prompt. The first prompt-tool turn sends the full compact protocol; later turns send compact reminders until periodic or forced refresh.
 
 ## Tool Mode Decision
 
@@ -98,11 +98,13 @@ Read in this order:
 2. `streamOmni()` — runtime router for native vs prompt tool mode.
 3. `shouldUsePromptTools()` — decides if prompt tool fallback is needed.
 4. `streamWithPromptTools()` — prompt-tool stream implementation.
-5. `renderToolProtocol()` — converts Pi tool schemas into prompt text.
-6. `flattenMessages()` — converts native tool history into text history for chat-only models.
-7. `parseToolCalls()` — parses `<tool_call>` blocks from model output.
-8. `getAllModelsFromOmniRoute()` — fetches `/v1/models` and converts to Pi model entries.
-9. `humanName()` — user-friendly labels for Ctrl+P.
+5. `selectPromptToolProtocol()` — chooses full protocol vs compact reminder using session/model/tool state.
+6. `renderFullToolProtocol()` — converts all active Pi tools into compact prompt text with descriptions and parameter schemas.
+7. `renderToolProtocolReminder()` — sends cheap steady-state reminders with compact per-tool argument hints.
+8. `flattenMessages()` — converts native tool history into text history for chat-only models.
+9. `parseToolCalls()` — parses standalone `<tool_call>` blocks from model output and flags mixed prose/tool-call confusion.
+10. `getAllModelsFromOmniRoute()` — fetches `/v1/models` and converts to Pi model entries.
+11. `humanName()` — user-friendly labels for Ctrl+P.
 
 ## Prompt Tool Wire Format
 
@@ -152,12 +154,17 @@ Then update README example model JSON if user-visible.
 Update together:
 
 ```ts
-renderToolProtocol()
+selectPromptToolProtocol()
+renderFullToolProtocol()
+renderToolProtocolReminder()
 TOOL_CALL_RE
 renderToolCallBlock()
 parseToolCalls()
 README.md
+ARCHITECTURE.md
 ```
+
+Prompt protocol state is kept in `promptToolProtocolStates`, keyed by `options.sessionId`, provider, and model id. Keep it runtime-only; do not write prompt protocol text into flattened messages or saved session entries.
 
 ### Change setup behavior
 
@@ -185,7 +192,10 @@ import ok
 - Do not rely only on Pi runtime `Model` for `tool_calling`; custom fields and OmniRoute `owned_by` are stripped.
 - Do not set web/chat-only models to a separate provider; keep `/model` workflow unchanged.
 - Do not send native `tools` to chat-only web-synced models; use prompt mode with `tools: []`.
+- Do not filter extension/custom tools out of prompt mode unless explicitly requested; full protocol exposes every active tool.
 - `streamWithPromptTools()` is buffered, not token-streamed. It waits for full response so it can parse tool blocks safely.
+- Prompt protocol is ephemeral outbound system-prompt text. It must not be appended to `flattenMessages()` or persisted into Pi session history.
+- Reminder turns intentionally use compact argument hints, while full protocol refreshes every 6 prompt-tool turns, after tool-signature changes, and after parsing confusion.
 - Prompt mode drops non-text content in history because chat-only OpenAI-compatible endpoints here are treated as text-first.
 
 ## Current Branch Intent

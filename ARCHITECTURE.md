@@ -73,13 +73,19 @@ Pi agent
   -> streamOmni(model, context, options)
   -> shouldUsePromptTools(model) === true
   -> streamWithPromptTools(model, context, options)
-  -> renderToolProtocol(context.tools)
+  -> selectPromptToolProtocol(model, context.tools, options)
+     -> full protocol on first prompt-tool turn
+     -> reminder protocol on steady-state turns
+     -> full protocol every 6 prompt-tool turns
+     -> full protocol when tool signature changes or parsing confusion occurs
   -> flattenMessages(context.messages)
   -> call openai-completions with tools: []
-  -> parse <tool_call> blocks from full text response
+  -> parse standalone <tool_call> blocks from full text response
   -> emit Pi-native toolcall_* stream events
   -> Pi executes tools
 ```
+
+The prompt-tool protocol is appended only to the outbound `systemPrompt` for the current provider request. It is not added to flattened messages and is not persisted into Pi's saved session history.
 
 ## Why `models.json` Is Re-read
 
@@ -121,9 +127,11 @@ Prompt mode uses this text protocol:
 Why XML-like tags:
 
 - easier to parse than arbitrary JSON in prose
-- allows normal answer text before tool call
 - supports multiple tool calls
 - can replay history using same structure
+- safe parser rule: tool calls execute only when the whole assistant message is `<tool_call>` block(s) plus whitespace
+
+Mixed prose plus `<tool_call>` is treated as normal text and does not execute tools. That protects documentation/examples from accidental execution.
 
 ## Stream Event Conversion
 
@@ -138,12 +146,29 @@ done(reason: "toolUse" | "stop")
 
 This makes Pi's normal agent loop execute tools, even though upstream model only wrote text.
 
+## Prompt Tool Protocol Refresh
+
+Prompt-tool protocol state is process-local and keyed by Pi's forwarded `options.sessionId`, provider, and model id. The state tracks the active tool signature, prompt-tool turn count, last full-protocol turn, and whether the next turn must force a full refresh.
+
+Full protocol includes every active Pi tool, including extension/custom tools, with compact descriptions and minified parameter schemas. Reminder protocol is much smaller but still includes compact parameter hints capped per tool, so stateless chat-completion requests still have argument shape guidance between full refreshes.
+
+Full protocol is sent when:
+
+- first prompt-tool turn for a session/model
+- active tool signature changes
+- 6 prompt-tool turns have passed since the last full protocol
+- previous response had malformed standalone tool JSON
+- previous response mixed prose with `<tool_call>` tags
+
+The state map is bounded to 1000 entries and evicts the oldest key when adding a new entry beyond the limit.
+
 ## Known Trade-offs
 
 - Prompt mode is buffered: it waits for full model output before parsing tool calls.
 - Images in history/tool results are dropped in prompt mode.
 - Small models may emit malformed JSON; parse errors are returned as visible assistant text so the model can self-correct next turn.
 - Prompt tool calls are only as reliable as model instruction following.
+- Reminder turns use compact parameter hints, not full descriptions, to reduce context cost between periodic full refreshes.
 
 ## API Key Handling
 
