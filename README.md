@@ -88,13 +88,15 @@ Pi agent
   -> Pi executes tools normally
 ```
 
-The model is taught this wire format:
+The model is taught this wire format as a standalone assistant message:
 
 ```xml
 <tool_call>
 {"name":"read","arguments":{"path":"index.ts"}}
 </tool_call>
 ```
+
+Prompt tool mode only executes tool calls when the entire assistant message is one or more `<tool_call>` blocks plus whitespace. If the model includes prose, examples, or any extra text alongside `<tool_call>`, the extension treats the whole response as normal text and does not execute tools. This prevents accidental tool calls from documentation snippets or mixed explanatory answers.
 
 Tool results are fed back in history as text:
 

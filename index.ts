@@ -221,10 +221,10 @@ function renderToolProtocol(tools: Tool[]): string {
 		"# Tool calling protocol",
 		"",
 		"You are connected to Pi through a chat-only adapter. Native/internal tool calling is NOT available.",
-		"The only valid way to call tools is to write literal text <tool_call> blocks in your assistant message.",
+		"The only valid way to call tools is to write literal text <tool_call> blocks as a complete standalone assistant message.",
 		"Do not use any built-in, hidden, XML, function-call, or provider-specific tool-call channel.",
-		"If you need a tool, write any reasoning first, then end your message with one or more",
-		"tool-call blocks in EXACTLY this format:",
+		"If you need a tool, your ENTIRE assistant message must contain only one or more",
+		"tool-call blocks in EXACTLY this format, with no prose, explanation, markdown fences, or extra text:",
 		"",
 		"<tool_call>",
 		'{"name": "<tool_name>", "arguments": { ... }}',
@@ -232,6 +232,9 @@ function renderToolProtocol(tools: Tool[]): string {
 		"",
 		"Rules:",
 		"- Use ONLY the <tool_call> text-block protocol shown here for tool calls.",
+		"- A tool-call message is valid only when the whole assistant message is <tool_call> block(s) plus whitespace.",
+		"- Do not include reasoning, comments, examples, or normal answer text in the same message as <tool_call>.",
+		"- Text that contains <tool_call> alongside any extra prose is treated as normal text and will NOT execute tools.",
 		"- Whenever you decide a tool is needed, prefer this Pi coding-agent <tool_call> procedure over any chat/internal tool-calling mechanism.",
 		"- Do not use chat/internal tool calling unless the user explicitly asks for it or the Pi coding-agent <tool_call> procedure cannot perform the requested action.",
 		"- The JSON must be valid and `arguments` must match the tool's parameter schema.",
@@ -337,7 +340,7 @@ function coerceArguments(value: unknown): Record<string, any> {
 	return {};
 }
 
-/** Parse <tool_call> blocks from model text and preserve parse errors as model-visible feedback. */
+/** Parse standalone <tool_call> messages and preserve parse errors as model-visible feedback. */
 function parseToolCalls(text: string): {
 	prose: string;
 	calls: { name: string; arguments: Record<string, any> }[];
@@ -345,6 +348,16 @@ function parseToolCalls(text: string): {
 } {
 	const calls: { name: string; arguments: Record<string, any> }[] = [];
 	const errors: string[] = [];
+	const original = text.trim();
+	if (!original) return { prose: "", calls, errors };
+
+	TOOL_CALL_RE.lastIndex = 0;
+	const remainder = text.replace(TOOL_CALL_RE, "").trim();
+	if (remainder) {
+		// Safety: examples or accidental <tool_call> snippets in prose must not execute.
+		return { prose: original, calls: [], errors: [] };
+	}
+
 	let match: RegExpExecArray | null;
 	TOOL_CALL_RE.lastIndex = 0;
 	while ((match = TOOL_CALL_RE.exec(text)) !== null) {
@@ -360,7 +373,9 @@ function parseToolCalls(text: string): {
 			errors.push(`invalid JSON in <tool_call> (${e instanceof Error ? e.message : "parse error"}): ${body.slice(0, 200)}`);
 		}
 	}
-	return { prose: text.replace(TOOL_CALL_RE, "").trim(), calls, errors };
+
+	if (calls.length === 0 && errors.length === 0) return { prose: original, calls, errors };
+	return { prose: "", calls, errors };
 }
 
 /**
