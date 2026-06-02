@@ -1,89 +1,114 @@
 /**
  * OmniRoute Manager — Pi Coding Agent Extension
  *
- * Manages OmniRoute (https://github.com/diegosouzapw/OmniRoute) from within
- * pi (https://github.com/earendil-works/pi/tree/main/packages/coding-agent).
- *
- * Features:
- *   - Status bar shows which model actually served each response (via call logs when available)
- *   - Public API setup and model sync
- *   - Public-only mode for remote OmniRoute servers that block management endpoints
+ * Public-only OmniRoute integration for pi.
  *
  * Commands:
- *   /omni                  — Status dashboard
- *   /omni sync             — Sync all OmniRoute models to pi's Ctrl+P picker
+ *   /omni                  — Status
+ *   /omni sync             — Sync public OmniRoute models to pi's Ctrl+P picker
  *   /omni setup            — Setup OmniRoute URL and API key
  *   /omni dashboard        — Show OmniRoute web dashboard URL
- *
- * Installation:
- *   1. Copy this file to ~/.pi/agent/extensions/omniroute-manager.ts
- *   2. Ensure OmniRoute is running
- *   3. Run /omni setup to configure URL and API key
- *   4. Start pi — the extension auto-loads and shows OmniRoute status.
  *
  * License: MIT
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+	calculateCost,
+	createAssistantMessageEventStream,
+	getApiProvider,
+	type AssistantMessage,
+	type AssistantMessageEventStream,
+	type Context,
+	type Message,
+	type Model,
+	type SimpleStreamOptions,
+	type TextContent,
+	type Tool,
+	type ToolCall,
+} from "@earendil-works/pi-ai";
 import { homedir } from "os";
 
-function getOmniUrl(): string {
-	try {
-		const fs = require("fs");
-		const data = JSON.parse(fs.readFileSync(modelsJsonPath(), "utf8"));
-		const url = data?.providers?.omni?.baseUrl;
-		if (url) return url.replace(/\/$/, "");
-	} catch {}
-	return "http://127.0.0.1:20128";
-}
+const OMNI_PROMPT_TOOLS_API = "omni-prompt-tools";
+const UNDERLYING_API = "openai-completions";
 
-let OMNI_URL = getOmniUrl();
-let DASHBOARD_URL = OMNI_URL;
-
-function isOmniConfigured(): boolean {
-	try {
-		const fs = require("fs");
-		const data = JSON.parse(fs.readFileSync(modelsJsonPath(), "utf8"));
-		return !!data?.providers?.omni;
-	} catch {
-		return false;
-	}
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// ────────────────────────── helpers ──────────────────────────
-
+/** Resolve Pi's models.json path; PI_HOME lets tests/custom installs point elsewhere. */
 function modelsJsonPath(): string {
 	return process.env.PI_HOME
 		? `${process.env.PI_HOME}/models.json`
 		: `${homedir()}/.pi/agent/models.json`;
 }
 
+/** Read raw models.json because custom metadata like tool_calling is not preserved by Pi's Model type. */
+function readModelsJson(): any {
+	const fs = require("fs");
+	return JSON.parse(fs.readFileSync(modelsJsonPath(), "utf8"));
+}
+
+/** Load OmniRoute base URL from models.json, falling back to local default before setup. */
+function getOmniUrl(): string {
+	try {
+		const url = readModelsJson()?.providers?.omni?.baseUrl;
+		if (url) return url.replace(/\/$/, "");
+	} catch {}
+	return "http://127.0.0.1:20128";
+}
+
+/** Load OmniRoute API key from models.json for direct extension HTTP calls. */
 function getApiKey(): string {
 	try {
-		const fs = require("fs");
-		const data = JSON.parse(fs.readFileSync(modelsJsonPath(), "utf8"));
-		return data?.providers?.omni?.apiKey || "";
+		return readModelsJson()?.providers?.omni?.apiKey || "";
 	} catch {
 		return "";
 	}
 }
 
+/** Check whether /omni setup has created a provider entry. */
+function isOmniConfigured(): boolean {
+	try {
+		return !!readModelsJson()?.providers?.omni;
+	} catch {
+		return false;
+	}
+}
+
+let OMNI_URL = getOmniUrl();
+let DASHBOARD_URL = OMNI_URL;
+
+/**
+ * Register/refresh the omni provider with a custom stream handler.
+ * This keeps /model UX unchanged while letting us choose native vs prompt tools at runtime.
+ */
+function registerOmniProvider(pi: ExtensionAPI): void {
+	try {
+		const provider = readModelsJson()?.providers?.omni;
+		if (!provider) return;
+
+		pi.registerProvider("omni", {
+			name: "OmniRoute",
+			baseUrl: (provider.baseUrl || OMNI_URL).replace(/\/$/, ""),
+			// Pi/OpenAI SDK require a non-empty apiKey; OmniRoute may ignore this dummy for public/local setups.
+			apiKey: provider.apiKey || "omniroute-public",
+			api: OMNI_PROMPT_TOOLS_API,
+			streamSimple: streamOmni,
+			models: (provider.models || []).map((model: any) => ({
+				id: model.id,
+				name: model.name || humanName(model.id),
+				api: OMNI_PROMPT_TOOLS_API,
+				reasoning: model.reasoning ?? false,
+				thinkingLevelMap: model.thinkingLevelMap,
+				input: model.input || ["text"],
+				cost: model.cost || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: model.contextWindow || 128000,
+				maxTokens: model.maxTokens || 16384,
+				headers: model.headers,
+				compat: model.compat,
+			})),
+		});
+	} catch {}
+}
+
+/** Call OmniRoute management/public API using saved URL/key. */
 async function api(path: string, opts?: RequestInit): Promise<any> {
 	const apiKey = getApiKey();
 	const res = await fetch(`${OMNI_URL}${path}`, {
@@ -95,35 +120,17 @@ async function api(path: string, opts?: RequestInit): Promise<any> {
 		},
 		signal: AbortSignal.timeout(10000),
 	});
+
 	if (!res.ok) {
 		const body = await res.text();
-		const err: any = new Error(`${res.status}: ${body}`);
-		err.status = res.status;
-		err.body = body;
-		throw err;
+		throw new Error(`${res.status}: ${body}`);
 	}
+
 	const text = await res.text();
-	if (!text) return {};
-	return JSON.parse(text);
+	return text ? JSON.parse(text) : {};
 }
 
-function isManagementAuthError(error: any): boolean {
-	const msg = String(error?.message || error || "").toLowerCase();
-	const body = String(error?.body || "").toLowerCase();
-	return msg.includes("invalid management token") ||
-		msg.includes("authentication required") ||
-		msg.includes("auth_001") ||
-		body.includes("invalid management token") ||
-		body.includes("authentication required") ||
-		body.includes("auth_001");
-}
-
-function managementOnlyMessage(action: string): string {
-	return `${action} unavailable: current OmniRoute server allows public model API but blocks management endpoints for API keys. Use /omni sync and normal model routing, or use OmniRoute dashboard session for management tasks.`;
-}
-
-// ────────────────────────── health ──────────────────────────
-
+/** Quick health probe used for status bar and /omni status. */
 async function checkOmniRouteHealth(): Promise<boolean> {
 	try {
 		const apiKey = getApiKey();
@@ -137,516 +144,388 @@ async function checkOmniRouteHealth(): Promise<boolean> {
 	}
 }
 
-// ────────────────────────── combos ──────────────────────────
-
-interface Combo {
+type SyncedModel = {
 	id: string;
 	name: string;
-	models: (string | { model: string; weight: number })[];
-	strategy: string;
-	isActive?: boolean;
+	owned_by?: string;
+	contextWindow?: number;
+	maxTokens?: number;
+	reasoning?: boolean;
+	input?: string[];
+	api?: string;
+	tool_calling?: boolean;
+};
+
+/** Normalize OmniRoute modality names to Pi-supported input values. */
+function normalizeModalities(value: unknown): string[] {
+	if (!Array.isArray(value)) return [];
+	const out: string[] = [];
+	for (const item of value) {
+		if (typeof item !== "string") continue;
+		const normalized = item.trim().toLowerCase();
+		if ((normalized === "text" || normalized === "image") && !out.includes(normalized)) {
+			out.push(normalized);
+		}
+	}
+	return out;
 }
 
-async function listCombos(): Promise<Combo[]> {
+/** Filter out image-generation/non-chat models so Ctrl+P only shows usable chat models. */
+function isPiChatModel(model: any): boolean {
+	if (!model || typeof model !== "object") return true;
+	const output = normalizeModalities(model.output_modalities ?? model.output);
+	if (String(model.type || "chat").toLowerCase() === "image") return false;
+	return output.length === 0 || output.includes("text");
+}
+
+/** Detect web-synced models whose native function calling is unreliable/missing. */
+function isWebSyncedModel(...markers: unknown[]): boolean {
+	return markers
+		.filter((marker): marker is string => typeof marker === "string")
+		.some((marker) => marker.toLowerCase().includes("-web"));
+}
+
+/** Read per-model tool_calling:false from models.json; Pi strips this custom field from runtime Model. */
+function modelConfigToolCallingFalse(model: Pick<Model<any>, "id" | "provider">): boolean {
 	try {
-		const data = await api("/api/combos");
-		return data?.combos || data || [];
+		const provider = readModelsJson()?.providers?.[model.provider];
+		const configured = (provider?.models || []).find((m: any) => m?.id === model.id);
+		return configured?.tool_calling === false || isWebSyncedModel(configured?.id, configured?.name, configured?.owned_by, configured?.provider);
 	} catch {
-		return [];
+		return false;
 	}
 }
 
-function comboLine(c: Combo, idx: number): string {
-	const on = c.isActive !== false;
-	const flag = on ? "✅" : "⬜";
-	const count = c.models.length;
-	return `${flag} ${idx + 1}. ${c.name}  [${c.strategy}, ${count} model${count !== 1 ? "s" : ""}]`;
-}
-
-// ────────────────────────── providers & connections ──────────────────────────
-
-interface Connection {
-	id: string;
-	provider: string;
-	authType: string;
-	name: string;
-	isActive: boolean;
-	testStatus?: string;
-	lastError?: string;
-	errorCode?: string;
-	projectId?: string;
-	tokenExpiresAt?: string;
-	expiresAt?: string;
-	providerSpecificData?: { prefix?: string; nodeName?: string; baseUrl?: string };
-}
-
-interface ProviderNode {
-	id: string;
-	type: string;
-	name: string;
-	prefix: string;
-	baseUrl: string;
-}
-
-interface ProviderGroup {
-	displayName: string;
-	prefix: string;
-	connections: Connection[];
-	nodeId?: string;
-}
-
-async function listConnections(): Promise<Connection[]> {
-	try {
-		const data = await api("/api/providers");
-		return data?.connections || [];
-	} catch {
-		return [];
-	}
-}
-
-async function listProviderNodes(): Promise<ProviderNode[]> {
-	try {
-		const data = await api("/api/provider-nodes");
-		return data?.nodes || [];
-	} catch {
-		return [];
-	}
-}
-
-async function getProviderModels(connectionId: string): Promise<string[]> {
-	try {
-		const data = await api(`/api/providers/${connectionId}/models`);
-		const models = data?.models || [];
-		return models.map((m: any) => (typeof m === "string" ? m : m.id || m.name || String(m)));
-	} catch {
-		return [];
-	}
-}
-
-function getDisconnectedProviders(connections: Connection[]): Connection[] {
-	return connections.filter(
-		(c) =>
-			c.isActive &&
-			(c.testStatus === "error" ||
-				c.testStatus === "expired" ||
-				c.errorCode === "refresh_failed" ||
-				(c.lastError && c.lastError.includes("refresh failed")))
+/** Decide whether a model needs prompt-emulated tools instead of native OpenAI tool_calls. */
+function shouldUsePromptTools(model: Pick<Model<any>, "id" | "name" | "provider">): boolean {
+	return (
+		modelConfigToolCallingFalse(model) ||
+		isWebSyncedModel(model.id, model.name, model.provider) ||
+		`${model.provider || ""}`.toLowerCase().includes("-web")
 	);
 }
 
-function groupProviders(connections: Connection[], nodes: ProviderNode[]): ProviderGroup[] {
-	const groups = new Map<string, ProviderGroup>();
-	const nodeMap = new Map<string, ProviderNode>();
-	for (const n of nodes) nodeMap.set(n.id, n);
+let protocolCache: { key: string; text: string } | undefined;
 
-	for (const c of connections) {
-		const psd = c.providerSpecificData || {};
-		let displayName = psd.nodeName || c.provider;
-		const prefix = psd.prefix || "";
-
-		if (!psd.nodeName) {
-			displayName = c.provider.charAt(0).toUpperCase() + c.provider.slice(1);
-		}
-
-		const key = displayName;
-		if (!groups.has(key)) {
-			groups.set(key, { displayName, prefix, connections: [], nodeId: undefined });
-		}
-		const g = groups.get(key)!;
-		g.connections.push(c);
-
-		if (c.provider.startsWith("openai-compatible-") || c.provider.startsWith("anthropic-compatible-")) {
-			const node = nodeMap.get(c.provider);
-			if (node) {
-				g.prefix = node.prefix;
-				g.nodeId = node.id;
-			}
-		}
-	}
-
-	return Array.from(groups.values()).sort((a, b) => a.displayName.localeCompare(b.displayName));
+/** Stable cache key for the active tool set; avoids rebuilding identical prompt protocol each turn. */
+function toolsSignature(tools: Tool[]): string {
+	return JSON.stringify(tools.map((t) => [t.name, t.description, t.parameters]));
 }
 
-// ────────────────────────── model picker ──────────────────────────
+/** Render Pi's structured tools as text instructions for chat-only models. */
+function renderToolProtocol(tools: Tool[]): string {
+	const key = toolsSignature(tools);
+	if (protocolCache && protocolCache.key === key) return protocolCache.text;
 
-/** Multi-select model picker with grouped browsing by provider. */
-async function pickModelsLoop(
-	ctx: any,
-	allModels: { id: string; name: string }[],
-	currentModels: string[]
-): Promise<string[] | null> {
-	// Filter: only real models (must have provider/model format), skip combos
-	// Also deduplicate aliases — prefer short prefixes (cx/ over codex/, kr/ over kiro/)
-	const seen = new Map<string, string>(); // modelName → shortest prefixed ID
-	for (const m of allModels) {
-		if (!m.id.includes("/")) continue;
-		const modelName = m.id.split("/").slice(1).join("/");
-		const existing = seen.get(modelName);
-		if (!existing || m.id.length < existing.length) {
-			seen.set(modelName, m.id);
+	const lines: string[] = [
+		"# Tool calling protocol",
+		"",
+		"You can use tools. To call one or more tools, write any reasoning first, then end your",
+		"message with one or more tool-call blocks in EXACTLY this format:",
+		"",
+		"<tool_call>",
+		'{"name": "<tool_name>", "arguments": { ... }}',
+		"</tool_call>",
+		"",
+		"Rules:",
+		"- The JSON must be valid and `arguments` must match the tool's parameter schema.",
+		"- Put the JSON directly inside the tags. Do NOT wrap it in ```json markdown fences.",
+		'- `arguments` must be a JSON object literal, not a string (use {"path":"x"}, not "{\\"path\\":\\"x\\"}").',
+		"- Emit multiple <tool_call> blocks to call several tools in one turn.",
+		"- After emitting tool calls, STOP and wait; tool results arrive as <tool_result> messages.",
+		"- If no tool is needed, answer normally with NO <tool_call> block.",
+		"",
+		"## Available tools",
+		"",
+	];
+
+	for (const tool of tools) {
+		lines.push(`### ${tool.name}`);
+		lines.push(tool.description);
+		lines.push("Parameters (JSON Schema):");
+		lines.push("```json");
+		lines.push(JSON.stringify(tool.parameters, null, 2));
+		lines.push("```");
+		lines.push("");
+	}
+
+	const text = lines.join("\n");
+	protocolCache = { key, text };
+	return text;
+}
+
+/** Extract text blocks and drop unsupported content like images for plain chat endpoints. */
+function textOf(content: string | (TextContent | { type: string })[]): string {
+	if (typeof content === "string") return content;
+	return content
+		.filter((c): c is TextContent => c.type === "text")
+		.map((c) => c.text)
+		.join("");
+}
+
+/** Convert prior native Pi tool calls into text blocks chat-only models can read. */
+function renderToolCallBlock(tc: ToolCall): string {
+	return `<tool_call>\n${JSON.stringify({ name: tc.name, arguments: tc.arguments })}\n</tool_call>`;
+}
+
+type FlattenableMessage = Message | { role: "system"; content: string | TextContent[]; timestamp?: number };
+
+/** Flatten native Pi message history into user/assistant text history for non-tool-capable chat APIs. */
+function flattenMessages(messages: FlattenableMessage[]): Message[] {
+	const out: Message[] = [];
+	const pushText = (role: "user" | "assistant", text: string) => {
+		if (!text.trim()) return;
+		const last = out[out.length - 1];
+		if (last && last.role === role) {
+			const block = (last.content as TextContent[])[0];
+			block.text += `\n\n${text}`;
+			return;
+		}
+		out.push({ role, content: [{ type: "text", text }], timestamp: Date.now() } as Message);
+	};
+
+	for (const msg of messages) {
+		if (msg.role === "user") {
+			pushText("user", textOf(msg.content));
+		} else if (msg.role === "assistant") {
+			const prose = textOf(msg.content);
+			const calls = Array.isArray(msg.content)
+				? msg.content.filter((c): c is ToolCall => c.type === "toolCall")
+				: [];
+			const parts = [prose, ...calls.map(renderToolCallBlock)].filter((s) => s.trim());
+			pushText("assistant", parts.join("\n\n"));
+		} else if (msg.role === "toolResult") {
+			const body = textOf(msg.content);
+			const tag = msg.isError ? "tool_result error" : "tool_result";
+			pushText("user", `<${tag} tool="${msg.toolName}" id="${msg.toolCallId}">\n${body}\n</tool_result>`);
+		} else if (msg.role === "system") {
+			// Pi normally uses context.systemPrompt, but preserve unexpected system messages defensively.
+			pushText("user", `<system>\n${textOf(msg.content)}\n</system>`);
 		}
 	}
-	const dedupedIds = new Set(seen.values());
+	return out;
+}
 
-	// Build a map to normalize any alias to its canonical (shortest) form
-	const toCanonical = new Map<string, string>();
-	for (const m of allModels) {
-		if (!m.id.includes("/")) continue;
-		const modelName = m.id.split("/").slice(1).join("/");
-		const canonical = seen.get(modelName);
-		if (canonical) toCanonical.set(m.id, canonical);
+const TOOL_CALL_RE = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g;
+
+/** Tolerate models that wrap tool JSON inside ```json fences despite instructions. */
+function stripCodeFence(raw: string): string {
+	return raw
+		.replace(/^\s*```(?:json|JSON)?\s*\n?/, "")
+		.replace(/\n?\s*```\s*$/, "")
+		.trim();
+}
+
+/** Tolerate models that emit arguments as a JSON string instead of an object. */
+function coerceArguments(value: unknown): Record<string, any> {
+	if (value && typeof value === "object") return value as Record<string, any>;
+	if (typeof value === "string") {
+		try {
+			const parsed = JSON.parse(value);
+			if (parsed && typeof parsed === "object") return parsed as Record<string, any>;
+		} catch {}
 	}
+	return {};
+}
 
-	// Normalize currentModels to canonical form so ✅ marks show correctly
-	const selected = new Set<string>(
-		currentModels.map((m) => toCanonical.get(m) || m)
-	);
-
-	// Group models by provider
-	const byProvider = new Map<string, string[]>();
-	for (const id of dedupedIds) {
-		const provider = id.split("/")[0];
-		if (!byProvider.has(provider)) byProvider.set(provider, []);
-		byProvider.get(provider)!.push(id);
-	}
-	const providers = Array.from(byProvider.keys()).sort();
-
-	let picking = true;
-	while (picking) {
-		const summary = selected.size > 0
-			? Array.from(selected).join(", ")
-			: "(none)";
-
-		// Top-level: pick a provider to browse, or finish
-		const providerOpts = [
-			`── Done (${selected.size} models selected) ──`,
-			...providers.map((p) => {
-				const models = byProvider.get(p)!;
-				const count = models.filter((m) => selected.has(m)).length;
-				const tag = count > 0 ? ` [${count} selected]` : "";
-				return `${p}/ (${models.length} models)${tag}`;
-			}),
-		];
-
-		const providerPick = await ctx.ui.select(`Models: ${summary}`, providerOpts);
-		if (!providerPick || providerPick.startsWith("── Done")) {
-			picking = false;
-			continue;
-		}
-
-		// Extract provider name from "provider/ (N models) [X selected]"
-		const providerName = providerPick.split("/")[0];
-		const models = byProvider.get(providerName);
-		if (!models) continue;
-
-		// Browse models within this provider
-		let browsingProvider = true;
-		while (browsingProvider) {
-			const modelOpts = [
-				"← Back to providers",
-				...models.map((m) => `${selected.has(m) ? "✅" : "⬜"} ${m}`),
-			];
-
-			const selectedCount = models.filter((m) => selected.has(m)).length;
-			const modelPick = await ctx.ui.select(
-				`${providerName}/ — ${selectedCount}/${models.length} selected`,
-				modelOpts
-			);
-
-			if (!modelPick || modelPick === "← Back to providers") {
-				browsingProvider = false;
+/** Parse <tool_call> blocks from model text and preserve parse errors as model-visible feedback. */
+function parseToolCalls(text: string): {
+	prose: string;
+	calls: { name: string; arguments: Record<string, any> }[];
+	errors: string[];
+} {
+	const calls: { name: string; arguments: Record<string, any> }[] = [];
+	const errors: string[] = [];
+	let match: RegExpExecArray | null;
+	TOOL_CALL_RE.lastIndex = 0;
+	while ((match = TOOL_CALL_RE.exec(text)) !== null) {
+		const body = stripCodeFence(match[1]);
+		try {
+			const parsed = JSON.parse(body);
+			if (parsed && typeof parsed.name === "string") {
+				calls.push({ name: parsed.name, arguments: coerceArguments(parsed.arguments) });
 			} else {
-				const modelId = modelPick.replace(/^[✅⬜] /, "");
-				if (selected.has(modelId)) {
-					selected.delete(modelId);
-				} else {
-					selected.add(modelId);
-				}
+				errors.push(`tool_call missing a string "name": ${body.slice(0, 200)}`);
 			}
+		} catch (e) {
+			errors.push(`invalid JSON in <tool_call> (${e instanceof Error ? e.message : "parse error"}): ${body.slice(0, 200)}`);
 		}
 	}
-	return selected.size > 0 ? Array.from(selected) : null;
+	return { prose: text.replace(TOOL_CALL_RE, "").trim(), calls, errors };
 }
 
-// ────────────────────────── doctor diagnostics ──────────────────────────
+/**
+ * Prompt-tool stream path for chat-only models.
+ * It injects tool schemas as text, calls OmniRoute without native tools, then converts parsed blocks back to Pi toolCall events.
+ */
+function streamWithPromptTools(
+	model: Model<any>,
+	context: Context,
+	options?: SimpleStreamOptions,
+): AssistantMessageEventStream {
+	const stream = createAssistantMessageEventStream();
 
-interface DoctorIssue {
-	severity: "error" | "warning" | "info";
-	message: string;
-	fix?: () => Promise<string>; // returns result message
-}
-
-/** Find combos with conn:-prefixed models and build fixes to replace with provider-level IDs */
-function findConnPrefixedCombos(combos: Combo[], connections: Connection[]): DoctorIssue[] {
-	const issues: DoctorIssue[] = [];
-	const connMap = new Map(connections.map((c) => [c.id, c]));
-
-	for (const combo of combos) {
-		const models = combo.models.map((m) => (typeof m === "string" ? m : m.model));
-		const connModels = models.filter((m) => m.startsWith("conn:"));
-		if (connModels.length === 0) continue;
-
-		// Build replacement: resolve conn:UUID/model → provider/model
-		const replacements = new Map<string, string>();
-		for (const cm of connModels) {
-			const match = cm.match(/^conn:([^/]+)\/(.+)$/);
-			if (!match) continue;
-			const [, connId, modelName] = match;
-			const conn = connMap.get(connId);
-			const provider = conn?.provider || "unknown";
-			replacements.set(cm, `${provider}/${modelName}`);
-		}
-
-		const fixedModels = models.map((m) => replacements.get(m) || m);
-		// Deduplicate — multiple conn: entries may resolve to the same provider/model
-		const uniqueModels = fixedModels.filter((m, i) => fixedModels.indexOf(m) === i);
-
-		issues.push({
-			severity: "error",
-			message: `Combo "${combo.name}" uses ${connModels.length} connection-pinned model(s) (conn:…). ` +
-				`These fail when that specific account's token expires. ` +
-				`Fix: replace with provider-level IDs so OmniRoute can pick any healthy account.`,
-			fix: async () => {
-				await api(`/api/combos/${combo.id}`, {
-					method: "PUT",
-					body: JSON.stringify({ models: uniqueModels }),
-				});
-				return `✅ Fixed "${combo.name}": ${connModels.length} conn: refs → ${uniqueModels.join(", ")}`;
+	(async () => {
+		const output: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
-		});
-	}
-	return issues;
-}
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
 
-/** Find antigravity accounts missing projectId and offer to deprioritize */
-function findMissingProjectIds(connections: Connection[]): DoctorIssue[] {
-	const broken = connections.filter((c) => c.provider === "antigravity" && c.isActive && !c.projectId);
-	const healthy = connections.filter((c) => c.provider === "antigravity" && c.isActive && c.projectId);
+		try {
+			stream.push({ type: "start", partial: output });
 
-	return broken.map((c) => ({
-		severity: "warning" as const,
-		message: `Antigravity account "${c.name}" is missing projectId — Google will reject requests with 400. ` +
-			(healthy.length > 0
-				? `${healthy.length} other antigravity account(s) are healthy. `
-				: `Consider using Gemini AI Studio (API key) instead — it doesn't need a projectId. `) +
-			`Reconnect in dashboard: ${DASHBOARD_URL} → Providers → disconnect & reconnect.`,
-	}));
-}
+			const tools = context.tools ?? [];
+			const innerContext: Context = {
+				systemPrompt: tools.length > 0
+					? `${context.systemPrompt ?? ""}\n\n${renderToolProtocol(tools)}`.trim()
+					: context.systemPrompt,
+				messages: flattenMessages(context.messages),
+				tools: [],
+			};
 
-/** Find combos where all models depend on a single provider that has issues */
-function findFragileCombos(combos: Combo[], connections: Connection[]): DoctorIssue[] {
-	const issues: DoctorIssue[] = [];
+			const provider = getApiProvider(UNDERLYING_API);
+			if (!provider) throw new Error(`Underlying api "${UNDERLYING_API}" is not registered`);
 
-	// Check which providers have healthy accounts
-	const healthyProviders = new Set<string>();
-	for (const c of connections) {
-		if (c.isActive && c.testStatus === "active") {
-			// For antigravity, only count if it has projectId
-			if (c.provider === "antigravity" && !c.projectId) continue;
-			healthyProviders.add(c.provider);
-		}
-	}
+			const innerModel: Model<any> = { ...model, api: UNDERLYING_API };
+			const inner = provider.streamSimple(innerModel, innerContext, options);
+			// Prompt-tool mode is intentionally buffered: complete text is needed to parse <tool_call> blocks safely.
+			const innerResult = await inner.result();
 
-	// Check if gemini (AI Studio) is available as an alternative
-	const hasGemini = healthyProviders.has("gemini");
+			output.usage = { ...innerResult.usage };
+			output.responseId = innerResult.responseId;
+			output.responseModel = innerResult.responseModel;
+			if (innerResult.stopReason === "error" || innerResult.stopReason === "aborted") {
+				output.stopReason = innerResult.stopReason;
+				output.errorMessage = innerResult.errorMessage;
+				stream.push({ type: "error", reason: output.stopReason, error: output });
+				stream.end();
+				return;
+			}
 
-	for (const combo of combos) {
-		if (combo.isActive === false) continue;
-		const models = combo.models.map((m) => (typeof m === "string" ? m : m.model));
-		const providers = models.map((m) => m.split("/")[0]);
-		const uniqueProviders = providers.filter((p, i) => providers.indexOf(p) === i);
+			const rawText = textOf(innerResult.content as TextContent[]);
+			const parsed = tools.length > 0 ? parseToolCalls(rawText) : { prose: rawText, calls: [], errors: [] as string[] };
+			let prose = parsed.prose;
 
-		// All models use antigravity and it's broken
-		const allAntigravity = uniqueProviders.length === 1 && uniqueProviders[0] === "antigravity";
-		if (allAntigravity && !healthyProviders.has("antigravity") && hasGemini) {
-			issues.push({
-				severity: "error",
-				message: `Combo "${combo.name}" uses only antigravity models (which have projectId issues). ` +
-					`Gemini AI Studio is available and working — swap to gemini/ models?`,
-				fix: async () => {
-					// Map antigravity model names to gemini equivalents
-					const mapped = models.map((m) => {
-						const modelName = m.split("/").slice(1).join("/");
-						return `gemini/${modelName}`;
-					});
-					// Verify the gemini models exist
-					let available: string[] = [];
-					try {
-						const data = await api("/v1/models");
-						available = (data?.data || []).map((m: any) => m.id).filter(Boolean);
-					} catch {}
-					const valid = mapped.filter((m) => available.includes(m));
-					if (valid.length === 0) {
-						// Fall back to popular gemini models
-						valid.push("gemini/gemini-2.5-pro");
-						if (combo.strategy === "round-robin") valid.push("gemini/gemini-2.5-flash");
-					}
-					await api(`/api/combos/${combo.id}`, {
-						method: "PUT",
-						body: JSON.stringify({ models: valid }),
-					});
-					return `✅ Fixed "${combo.name}": switched to ${valid.join(", ")}`;
-				},
+			if (parsed.errors.length > 0) {
+				const note = [
+					"[omni-prompt-tools] Could not parse tool call(s). Re-emit each as:",
+					'<tool_call>{"name":"tool_name","arguments":{}}</tool_call>',
+					...parsed.errors.map((e) => `- ${e}`),
+				].join("\n");
+				prose = prose ? `${prose}\n\n${note}` : note;
+			}
+
+			if (prose) {
+				output.content.push({ type: "text", text: prose });
+				const idx = output.content.length - 1;
+				stream.push({ type: "text_start", contentIndex: idx, partial: output });
+				stream.push({ type: "text_delta", contentIndex: idx, delta: prose, partial: output });
+				stream.push({ type: "text_end", contentIndex: idx, content: prose, partial: output });
+			}
+
+			parsed.calls.forEach((call, i) => {
+				const id = `call_${Date.now().toString(36)}_${i}_${Math.random().toString(36).slice(2, 8)}`;
+				const toolCall: ToolCall = { type: "toolCall", id, name: call.name, arguments: call.arguments };
+				output.content.push(toolCall);
+				const idx = output.content.length - 1;
+				stream.push({ type: "toolcall_start", contentIndex: idx, partial: output });
+				stream.push({ type: "toolcall_delta", contentIndex: idx, delta: JSON.stringify(call.arguments), partial: output });
+				stream.push({ type: "toolcall_end", contentIndex: idx, toolCall, partial: output });
 			});
-		}
 
-		// Combo has models from providers with zero healthy accounts
-		const deadProviders = uniqueProviders.filter((p) => !healthyProviders.has(p));
-		if (deadProviders.length > 0 && !allAntigravity) {
-			const aliveModels = models.filter((m) => !deadProviders.includes(m.split("/")[0]));
-			if (aliveModels.length === 0) {
-				issues.push({
-					severity: "warning",
-					message: `Combo "${combo.name}" has no models from healthy providers ` +
-						`(broken: ${deadProviders.join(", ")}). All requests will fail.`,
-				});
-			} else if (deadProviders.length > 0) {
-				issues.push({
-					severity: "info",
-					message: `Combo "${combo.name}" includes models from unhealthy providers ` +
-						`(${deadProviders.join(", ")}). These will be skipped at runtime.`,
-				});
-			}
+			output.stopReason = parsed.calls.length > 0 ? "toolUse" : "stop";
+			calculateCost(model, output.usage);
+			stream.push({ type: "done", reason: output.stopReason as "stop" | "length" | "toolUse", message: output });
+			stream.end();
+		} catch (error) {
+			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
+			output.errorMessage = error instanceof Error ? error.message : String(error);
+			stream.push({ type: "error", reason: output.stopReason, error: output });
+			stream.end();
 		}
+	})();
+
+	return stream;
+}
+
+/** Main provider stream router: web/tool_calling:false models use prompt tools; all others use native tools. */
+function streamOmni(
+	model: Model<any>,
+	context: Context,
+	options?: SimpleStreamOptions,
+): AssistantMessageEventStream {
+	if (shouldUsePromptTools(model)) return streamWithPromptTools(model, context, options);
+
+	const provider = getApiProvider(UNDERLYING_API);
+	if (!provider) throw new Error(`Underlying api "${UNDERLYING_API}" is not registered`);
+	return provider.streamSimple({ ...model, api: UNDERLYING_API }, context, options);
+}
+
+/** Merge duplicate OmniRoute model IDs while preserving best metadata from each source row. */
+function upsertSyncedModel(models: SyncedModel[], next: SyncedModel): void {
+	const index = models.findIndex((model) => model.id === next.id);
+	if (index < 0) {
+		models.push(next);
+		return;
 	}
-	return issues;
+
+	const existing = models[index];
+	const input = Array.from(new Set([...(existing.input || []), ...(next.input || [])]));
+	models[index] = {
+		...existing,
+		...next,
+		input: input.length > 0 ? input : existing.input,
+		contextWindow: next.contextWindow ?? existing.contextWindow,
+		maxTokens: next.maxTokens ?? existing.maxTokens,
+		reasoning: existing.reasoning || next.reasoning,
+	};
 }
 
-/** Check if the pi models.json API key is configured (info-level only — OmniRoute
- *  doesn't enforce keys on the Anthropic /v1/messages endpoint that pi uses). */
-function checkApiKey(): DoctorIssue[] {
-	const key = getApiKey();
-	if (!key) {
-		return [{
-			severity: "info",
-			message: `No API key in models.json. This is fine for the /v1/messages endpoint pi uses.`,
-		}];
+/** Fetch OmniRoute /v1/models and convert rows into Pi models.json entries. */
+async function getAllModelsFromOmniRoute(): Promise<SyncedModel[]> {
+	const results: SyncedModel[] = [];
+	const data = await api("/v1/models");
+	const models = data?.data || [];
+
+	for (const m of models) {
+		const id = typeof m === "string" ? m : m.id;
+		if (!id || !isPiChatModel(m)) continue;
+
+		const synced: SyncedModel = {
+			id,
+			name: humanName(id),
+			owned_by: m.owned_by,
+			api: OMNI_PROMPT_TOOLS_API,
+		};
+
+		if (isWebSyncedModel(id, m.name, m.owned_by, m.provider)) synced.tool_calling = false;
+
+		const input = normalizeModalities(m.input_modalities ?? m.input);
+		synced.input = input.length > 0 ? input : ["text"];
+
+		const contextWindow = m.context_length || m.max_input_tokens;
+		if (contextWindow) synced.contextWindow = contextWindow;
+
+		const maxTokens = m.max_output_tokens || m.max_tokens;
+		if (maxTokens) synced.maxTokens = maxTokens;
+
+		if (m.capabilities?.reasoning || m.capabilities?.thinking) synced.reasoning = true;
+
+		upsertSyncedModel(results, synced);
 	}
-	return [];
-}
-
-/** Find combos with no models */
-function findEmptyCombos(combos: Combo[]): DoctorIssue[] {
-	return combos
-		.filter((c) => c.models.length === 0)
-		.map((c) => ({
-			severity: "error" as const,
-			message: `Combo "${c.name}" has no models. It will fail if selected. ` +
-				`Add models in the dashboard: ${DASHBOARD_URL}`,
-		}));
-}
-
-/** Check for accounts with expired or soon-to-expire tokens */
-function findExpiringAccounts(connections: Connection[]): DoctorIssue[] {
-	const issues: DoctorIssue[] = [];
-	const now = Date.now();
-	for (const c of connections) {
-		if (!c.isActive) continue;
-		
-		const expiry = c.expiresAt || c.tokenExpiresAt;
-		if (expiry) {
-			const exp = new Date(expiry).getTime();
-			if (exp < now) {
-				issues.push({
-					severity: "warning",
-					message: `Account "${c.name}" (${c.provider}) session expired. Reconnect in dashboard.`,
-				});
-			} else if (exp < now + 1000 * 60 * 60 * 24) { // expires within 24h
-				issues.push({
-					severity: "info",
-					message: `Account "${c.name}" (${c.provider}) session expires soon (within 24h).`,
-				});
-			}
-		}
-	}
-	return issues;
-}
-
-// ────────────────────────── call log (resolved model tracking) ──────────────────────────
-
-interface CallLog {
-	id: string;
-	model: string;
-	provider: string;
-	account: string;
-	comboName?: string;
-	status: number;
-}
-
-async function getLastCallLog(): Promise<CallLog | null> {
-	try {
-		const logs: CallLog[] = await api("/api/usage/call-logs?limit=1");
-		return logs?.[0] || null;
-	} catch {
-		return null;
-	}
-}
-
-// ────────────────────────── model sync ──────────────────────────
-
-async function getAllModelsFromOmniRoute(): Promise<{ id: string; name: string; contextWindow?: number; maxTokens?: number; reasoning?: boolean; input?: string[] }[]> {
-	const results: {
-		id: string;
-		name: string;
-		owned_by?: string;
-		contextWindow?: number;
-		maxTokens?: number;
-		reasoning?: boolean;
-		input?: string[];
-	}[] = [];
-
-	// Models from built-in providers
-	try {
-		const data = await api("/v1/models");
-		const models = data?.data || [];
-		for (const m of models) {
-			const id = typeof m === "string" ? m : m.id;
-			if (id) {
-				const res: any = {
-					id,
-					name: humanName(id),
-					owned_by: m.owned_by,
-					api: "openai-completions",
-				};
-
-				const cw = m.context_length || m.max_input_tokens;
-				if (cw) res.contextWindow = cw;
-
-				results.push(res);
-			}
-		}
-	} catch {}
-
-	// Models from custom provider nodes (OpenAI-compatible, etc.)
-	try {
-		const [connections, nodes] = await Promise.all([listConnections(), listProviderNodes()]);
-		for (const node of nodes) {
-			const nodeConns = connections.filter((c) => c.provider === node.id && c.isActive);
-			for (const conn of nodeConns) {
-				const models = await getProviderModels(conn.id);
-				for (const modelId of models) {
-					const prefixedId = `${node.prefix}/${modelId}`;
-					if (!results.find((r) => r.id === prefixedId)) {
-						results.push({
-							id: prefixedId,
-							name: humanName(prefixedId),
-							owned_by: node.prefix,
-						});
-					}
-				}
-			}
-		}
-	} catch {}
-
-	// Combos as selectable models
-	try {
-		const combos = await listCombos();
-		for (const c of combos) {
-			if (!results.find((r) => r.id === c.name)) {
-				results.push({ id: c.name, name: c.name, owned_by: "0_combo" });
-			}
-		}
-	} catch {}
 
 	return results
 		.sort((a, b) => {
@@ -658,6 +537,7 @@ async function getAllModelsFromOmniRoute(): Promise<{ id: string; name: string; 
 		.map(({ owned_by, ...rest }) => rest);
 }
 
+/** Convert provider/model-id strings into friendlier Ctrl+P labels. */
 function humanName(id: string): string {
 	const parts = id.split("/");
 	const provider = parts.length > 1 ? parts[0] : "";
@@ -676,73 +556,16 @@ function humanName(id: string): string {
 	return name;
 }
 
-// ════════════════════════════════════════════════════════════
-// Extension entry point
-// ════════════════════════════════════════════════════════════
-
 export default function (pi: ExtensionAPI) {
 	let healthInterval: ReturnType<typeof setInterval> | undefined;
-	let lastSeenLogId = ""; // ID of the most recent call log entry we've already displayed
-
-	// ── Show resolved model in status bar after each response ──
-
-	pi.on("message_end", async (event: any, ctx: any) => {
-		try {
-			const msg = event.message as any;
-			if (msg?.role !== "assistant") return;
-
-			// Wait briefly for OmniRoute to log the call, then check.
-			// Two attempts: 500ms and 1500ms. Avoids the old 15×300ms poll loop.
-			let log: CallLog | null = null;
-
-			for (const delay of [500, 1000]) {
-				await new Promise((r) => setTimeout(r, delay));
-				const candidate = await getLastCallLog();
-				if (candidate && candidate.id !== lastSeenLogId) {
-					log = candidate;
-					break;
-				}
-			}
-
-			if (log) {
-				lastSeenLogId = log.id;
-				const combo = log.comboName ? `${log.comboName} → ` : "";
-				const acct = log.account ? ` · ${log.account}` : "";
-				const ok = log.status === 200;
-				const suffix = ok ? "" : ` ✗${log.status}`;
-				ctx.ui.setStatus("omni", `${combo}${log.model} (${log.provider}${acct})${suffix}`);
-			}
-		} catch {}
-	});
-
-	// ── Show predicted routing when model selection changes ──
+	registerOmniProvider(pi);
 
 	pi.on("model_select", async (event: any, ctx: any) => {
 		try {
 			const modelId = (event.model as any)?.id ?? "";
-			if (!modelId) return;
-
-			// Check if the selected model is a combo
-			const combos = await listCombos();
-			const combo = combos.find((c) => c.name === modelId);
-
-			if (!combo) {
-				// Plain model, just show it
-				ctx.ui.setStatus("omni", `→ ${modelId}`);
-				return;
-			}
-
-			// For combos, show the ordered model list so user knows what to expect
-			const models = combo.models.map((m) =>
-				typeof m === "string" ? m : m.model
-			);
-			const preview = models.slice(0, 3).join(" › ");
-			const more = models.length > 3 ? ` +${models.length - 3}` : "";
-			ctx.ui.setStatus("omni", `${combo.name} [${combo.strategy}]: ${preview}${more}`);
+			if (modelId) ctx.ui.setStatus("omni", `→ ${modelId}`);
 		} catch {}
 	});
-
-	// ── Startup: health check + disconnected provider warnings ──
 
 	pi.on("session_start", async (_event: any, ctx: any) => {
 		if (!isOmniConfigured()) {
@@ -755,58 +578,7 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.setStatus("omni", healthy ? "OmniRoute ✓" : "OmniRoute ✗");
 
 		if (healthy) {
-			try {
-				const [combos, conns] = await Promise.all([listCombos(), listConnections()]);
-				const active = combos.filter((c) => c.isActive !== false).length;
-				const disconnected = getDisconnectedProviders(conns);
-
-				ctx.ui.notify(`OmniRoute ready — ${combos.length} combos (${active} active)`, "info");
-
-				if (disconnected.length > 0) {
-					const names = disconnected
-						.map((c) => {
-							const psd = c.providerSpecificData || {};
-							return `  ❌ ${psd.nodeName || c.provider}: ${c.name} — ${c.lastError || c.errorCode || "disconnected"}`;
-						})
-						.join("\n");
-					ctx.ui.notify(
-						`⚠️ ${disconnected.length} provider(s) need re-authentication:\n${names}\n\nOpen ${DASHBOARD_URL} → Providers to re-connect.`,
-						"warning"
-					);
-				}
-
-				// Proactive diagnostics on startup
-				const issues = [
-					...checkApiKey(),
-
-					...findConnPrefixedCombos(combos, conns),
-					...findEmptyCombos(combos),
-					...findFragileCombos(combos, conns),
-					...findMissingProjectIds(conns),
-					...findExpiringAccounts(conns),
-				];
-				const fixable = issues.filter((i) => i.fix);
-				const warnings = issues.filter((i) => !i.fix && i.severity !== "info");
-
-				if (fixable.length > 0) {
-					ctx.ui.notify(
-						`⚠️ ${fixable.length} auto-fixable issue(s) detected. Run /omni doctor to diagnose & fix.`,
-						"warning"
-					);
-				}
-				if (warnings.length > 0) {
-					for (const w of warnings) {
-						ctx.ui.notify(`⚠️ ${w.message}`, "warning");
-					}
-				}
-			} catch (e: any) {
-				if (isManagementAuthError(e)) {
-					ctx.ui.setStatus("omni", "OmniRoute ✓ public-only");
-					ctx.ui.notify(managementOnlyMessage("Management features"), "warning");
-				} else {
-					throw e;
-				}
-			}
+			ctx.ui.notify("OmniRoute ready — public model API available", "info");
 		} else {
 			ctx.ui.notify(
 				`OmniRoute not reachable at ${OMNI_URL}\n\nCheck your URL setting or run /omni setup.`,
@@ -814,8 +586,6 @@ export default function (pi: ExtensionAPI) {
 			);
 		}
 
-		// Periodic health check — only update status if OmniRoute goes down
-		// (avoids overwriting the resolved model display)
 		healthInterval = setInterval(async () => {
 			const h = await checkOmniRouteHealth();
 			if (!h) ctx.ui.setStatus("omni", "OmniRoute ✗");
@@ -825,8 +595,6 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => {
 		if (healthInterval) clearInterval(healthInterval);
 	});
-
-	// ── /omni command ──
 
 	pi.registerCommand("omni", {
 		description: "OmniRoute: /omni [sync|setup|dashboard]",
@@ -839,361 +607,22 @@ export default function (pi: ExtensionAPI) {
 			const parts = args.trim().split(/\s+/);
 			const sub = parts[0]?.toLowerCase() || "";
 
-			// ──────────────── /omni (status dashboard) ────────────────
-
 			if (!sub) {
 				const healthy = await checkOmniRouteHealth();
-				try {
-					const [combos, conns] = await Promise.all([
-						listCombos(),
-						listConnections(),
-					]);
-
-					const active = combos.filter((c) => c.isActive !== false).length;
-					const activeConns = conns.filter((c) => c.isActive).length;
-					const disconnected = getDisconnectedProviders(conns);
-
-					const lines = [
-						"═══ OmniRoute Status ═══",
-						"",
-						`  OmniRoute: ${healthy ? "✅ healthy" : "❌ DOWN"} (${OMNI_URL})`,
-						"",
-						"─── Combos ───",
-						"",
-						...combos.map((c, i) => "  " + comboLine(c, i)),
-						...(combos.length === 0 ? ["  (none — create in dashboard)"] : []),
-						"",
-						"─── Providers ───",
-						"",
-						`  ${activeConns}/${conns.length} connections active`,
-					];
-
-					if (disconnected.length > 0) {
-						lines.push("");
-						lines.push("  ⚠️  Needs re-auth:");
-						for (const c of disconnected) {
-							const psd = c.providerSpecificData || {};
-							lines.push(`    ❌ ${psd.nodeName || c.provider}: ${c.name}`);
-						}
-						lines.push(`    → Open ${DASHBOARD_URL} → Providers`);
-					}
-
-					lines.push(
-						"",
-						"─── Commands ───",
-						"",
-						"  /omni sync            Sync models to Ctrl+P picker",
-						"  /omni setup           Save OmniRoute URL and API key",
-						"  /omni dashboard       Dashboard URL",
-					);
-
-					ctx.ui.notify(lines.join("\n"), "info");
-					ctx.ui.setStatus("omni", healthy ? "OmniRoute ✓" : "OmniRoute ✗");
-				} catch (e: any) {
-					if (!isManagementAuthError(e)) throw e;
-					ctx.ui.notify([
-						"═══ OmniRoute Status ═══",
-						"",
-						`  OmniRoute: ${healthy ? "✅ healthy" : "❌ DOWN"} (${OMNI_URL})`,
-						"  Mode: public-only",
-						"",
-						"Management endpoints blocked for API-key auth on this server.",
-						"",
-						"Supported:",
-						"  /omni sync            Sync public model list to Ctrl+P picker",
-						"  /omni setup           Save OmniRoute URL and API key",
-						"  /omni dashboard       Show dashboard URL",
-					].join("\n"), "info");
-					ctx.ui.setStatus("omni", healthy ? "OmniRoute ✓ public-only" : "OmniRoute ✗");
-				}
+				ctx.ui.notify([
+					"═══ OmniRoute Status ═══",
+					"",
+					`  OmniRoute: ${healthy ? "✅ healthy" : "❌ DOWN"} (${OMNI_URL})`,
+					"  Mode: public model API only",
+					"",
+					"Supported:",
+					"  /omni sync            Sync public /v1/models to Ctrl+P picker",
+					"  /omni setup           Save OmniRoute URL and API key",
+					"  /omni dashboard       Show dashboard URL",
+				].join("\n"), "info");
+				ctx.ui.setStatus("omni", healthy ? "OmniRoute ✓" : "OmniRoute ✗");
 				return;
 			}
-
-			// ──────────────── /omni combos ────────────────
-
-			if (sub === "__disabled_combos__") {
-				ctx.ui.notify(managementOnlyMessage("/omni combos"), "warning");
-				return;
-				let browsing = true;
-				while (browsing) {
-					const combos = await listCombos();
-					const liveId = ctx.model?.id ?? "";
-
-					const options = combos.map((c) => {
-						const on = c.isActive !== false ? "✅" : "⬜";
-						const live = c.name === liveId ? " 🔴" : "";
-						const models = c.models.map((m) => typeof m === "string" ? m : m.model);
-						const preview = models.slice(0, 3).join(", ");
-						const more = models.length > 3 ? ` +${models.length - 3}` : "";
-						return `${on} ${c.name} [${c.strategy} · ${c.models.length}]${live}  →  ${preview}${more}`;
-					});
-					options.push("── New Combo ──");
-					options.push("── Done ──");
-
-					const pick = await ctx.ui.select("Combos — select to manage:", options);
-					if (!pick || pick === "── Done ──") {
-						browsing = false;
-						continue;
-					}
-
-					if (pick === "── New Combo ──") {
-						const name = await ctx.ui.input("Combo name:");
-						if (!name) continue;
-						const strategy = await ctx.ui.select("Strategy:", ["priority", "round-robin", "random", "least-latency"]);
-						if (!strategy) continue;
-
-						// Sync models then pick
-						ctx.ui.notify("Syncing models from OmniRoute…", "info");
-						const allModels = await getAllModelsFromOmniRoute();
-						const selected = await pickModelsLoop(ctx, allModels, []);
-						if (!selected || selected.length === 0) continue;
-
-						try {
-							await api("/api/combos", {
-								method: "POST",
-								body: JSON.stringify({ name, strategy, models: selected }),
-							});
-							ctx.ui.notify(`✅ Created combo "${name}" with ${selected.length} models`, "info");
-						} catch (e: any) {
-							ctx.ui.notify(`Failed: ${e.message}`, "error");
-						}
-						continue;
-					}
-
-					// Selected an existing combo
-					const idx = options.indexOf(pick);
-					if (idx < 0 || idx >= combos.length) continue;
-					const combo = combos[idx];
-
-					// Show current models + actions for this combo
-					let managingCombo = true;
-					while (managingCombo) {
-						// Refresh combo state
-						const refreshed = await listCombos();
-						const current = refreshed.find((c) => c.id === combo.id) || combo;
-						const currentModels = current.models.map((m) => typeof m === "string" ? m : m.model);
-
-						const opts = [
-							...currentModels.map((m) => `  ❌ Remove: ${m}`),
-							"  ➕ Add models from providers…",
-							"──────────",
-							current.isActive !== false ? "⬜ Disable combo" : "✅ Enable combo",
-							"🔴 Set as active model",
-							`📋 Strategy: ${current.strategy}`,
-							"🗑️ Delete combo",
-							"← Back",
-						];
-
-						const action = await ctx.ui.select(
-							`${current.name} [${current.strategy} · ${currentModels.length} models]:`,
-							opts
-						);
-						if (!action || action === "← Back") {
-							managingCombo = false;
-							continue;
-						}
-
-						if (action === "──────────") continue;
-
-						if (action.startsWith("  ❌ Remove:")) {
-							const modelToRemove = action.replace("  ❌ Remove: ", "");
-							const updated = currentModels.filter((m) => m !== modelToRemove);
-							if (updated.length === 0) {
-								ctx.ui.notify("Can't remove the last model — delete the combo instead.", "warning");
-								continue;
-							}
-							try {
-								await api(`/api/combos/${current.id}`, {
-									method: "PUT",
-									body: JSON.stringify({ models: updated }),
-								});
-								ctx.ui.notify(`Removed ${modelToRemove}`, "info");
-							} catch (e: any) {
-								ctx.ui.notify(`Failed: ${e.message}`, "error");
-							}
-						} else if (action.includes("Add models")) {
-							ctx.ui.notify("Syncing models from OmniRoute…", "info");
-							const allModels = await getAllModelsFromOmniRoute();
-							const selected = await pickModelsLoop(ctx, allModels, currentModels);
-							if (!selected || selected.length === 0) continue;
-							try {
-								await api(`/api/combos/${current.id}`, {
-									method: "PUT",
-									body: JSON.stringify({ models: selected }),
-								});
-								ctx.ui.notify(`✅ Updated "${current.name}" — ${selected.length} models`, "info");
-							} catch (e: any) {
-								ctx.ui.notify(`Failed: ${e.message}`, "error");
-							}
-						} else if (action.includes("Disable") || action.includes("Enable")) {
-							const newState = current.isActive === false;
-							try {
-								await api(`/api/combos/${current.id}`, {
-									method: "PUT",
-									body: JSON.stringify({ isActive: newState }),
-								});
-								ctx.ui.notify(`${current.name} ${newState ? "enabled" : "disabled"}`, "info");
-							} catch (e: any) {
-								ctx.ui.notify(`Failed: ${e.message}`, "error");
-							}
-						} else if (action.includes("Set as active")) {
-							const model = ctx.modelRegistry.getAll().find((m: any) => m.id === current.name);
-							if (!model) {
-								ctx.ui.notify(`"${current.name}" not in model list — run /omni sync first`, "warning");
-							} else {
-								await pi.setModel(model);
-								ctx.ui.setStatus("omni", `🔴 ${current.name}`);
-								ctx.ui.notify(`Active model → ${current.name}`, "info");
-							}
-						} else if (action.includes("Strategy")) {
-							const strategy = await ctx.ui.select("Strategy:", ["priority", "round-robin", "random", "least-latency"]);
-							if (!strategy) continue;
-							try {
-								await api(`/api/combos/${current.id}`, {
-									method: "PUT",
-									body: JSON.stringify({ strategy }),
-								});
-								ctx.ui.notify(`✅ "${current.name}" strategy → ${strategy}`, "info");
-							} catch (e: any) {
-								ctx.ui.notify(`Failed: ${e.message}`, "error");
-							}
-						} else if (action.includes("Delete")) {
-							const confirm = await ctx.ui.select(`Delete "${current.name}"? This cannot be undone.`, ["Yes — delete", "No — cancel"]);
-							if (confirm?.startsWith("Yes")) {
-								try {
-									await api(`/api/combos/${current.id}`, { method: "DELETE" });
-									ctx.ui.notify(`Deleted "${current.name}"`, "info");
-									managingCombo = false;
-								} catch (e: any) {
-									ctx.ui.notify(`Failed: ${e.message}`, "error");
-								}
-							}
-						}
-					}
-				}
-				return;
-			}
-
-			// ──────────────── /omni providers ────────────────
-
-			if (sub === "__disabled_providers__") {
-				ctx.ui.notify(managementOnlyMessage("/omni providers"), "warning");
-				return;
-				const [conns, nodes] = await Promise.all([listConnections(), listProviderNodes()]);
-				const groups = groupProviders(conns, nodes);
-
-				const providerOptions = groups.map((g) => {
-					const activeCount = g.connections.filter((c) => c.isActive).length;
-					const totalCount = g.connections.length;
-					const prefixStr = g.prefix ? ` (${g.prefix}/)` : "";
-					const hasErrors = g.connections.some(
-						(c) => c.testStatus === "error" || c.testStatus === "expired"
-					);
-					const statusEmoji = hasErrors ? "❌" : activeCount === totalCount ? "✅" : activeCount > 0 ? "⚠️" : "⬜";
-					return `${statusEmoji} ${g.displayName}${prefixStr}  [${activeCount}/${totalCount} active]`;
-				});
-				providerOptions.push("── Add OpenAI-compatible provider ──");
-				providerOptions.push("── Back ──");
-
-				let browsing = true;
-				while (browsing) {
-					const choice = await ctx.ui.select("Select a provider to see details:", providerOptions);
-					if (!choice || choice === "── Back ──") {
-						browsing = false;
-						continue;
-					}
-
-					if (choice === "── Add OpenAI-compatible provider ──") {
-						const name = await ctx.ui.input("Provider name", "e.g. Together, Fireworks");
-						if (!name) continue;
-						const prefix = await ctx.ui.input("Short prefix (used as prefix/model-name)", "e.g. tog, fw");
-						if (!prefix) continue;
-						const baseUrl = await ctx.ui.input("Base URL (OpenAI-compatible /v1 endpoint)");
-						if (!baseUrl) continue;
-						const apiKey = await ctx.ui.input("API key");
-						if (!apiKey) continue;
-						try {
-							const nodeRes = await api("/api/provider-nodes", {
-								method: "POST",
-								body: JSON.stringify({ name, prefix, apiType: "chat", baseUrl, type: "openai-compatible" }),
-							});
-							const nodeId = nodeRes?.node?.id;
-							if (!nodeId) throw new Error("No node ID returned");
-							await api("/api/providers", {
-								method: "POST",
-								body: JSON.stringify({ provider: nodeId, apiKey, name: `${name} API Key` }),
-							});
-							ctx.ui.notify(`✅ Added: ${name} (${prefix}/)\nRun /omni sync to add models to Ctrl+P`, "info");
-						} catch (e: any) {
-							ctx.ui.notify(`Failed: ${e.message}`, "error");
-						}
-						continue;
-					}
-
-					const idx = providerOptions.indexOf(choice);
-					if (idx < 0 || idx >= groups.length) continue;
-
-					const group = groups[idx];
-					const lines = [
-						`═══ ${group.displayName} ═══`,
-						"",
-						"─── Accounts ───",
-					];
-
-					for (const c of group.connections) {
-						const status =
-							c.testStatus === "active" ? "✅" :
-							c.testStatus === "unknown" ? "⚪" :
-							c.testStatus === "error" || c.testStatus === "expired" ? "❌" : "⚠️";
-						lines.push(`  ${status} ${c.name} [${c.authType}] ${c.isActive ? "active" : "disabled"}`);
-						if (c.lastError) {
-							lines.push(`     └─ ${c.lastError}`);
-							if (c.authType === "oauth" || c.errorCode === "refresh_failed") {
-								lines.push(`     └─ Re-authenticate at ${DASHBOARD_URL} → Providers`);
-							}
-						}
-					}
-
-					const activeConn = group.connections.find((c) => c.isActive);
-					if (activeConn) {
-						lines.push("");
-						lines.push("─── Models ───");
-						const models = await getProviderModels(activeConn.id);
-						if (models.length > 0) {
-							const prefix = group.prefix || group.displayName.toLowerCase();
-							lines.push(`  ${models.length} models (use as ${prefix}/<name>)`);
-							lines.push("");
-							const maxShow = 30;
-							for (let i = 0; i < Math.min(models.length, maxShow); i++) {
-								lines.push(`  • ${prefix}/${models[i]}`);
-							}
-							if (models.length > maxShow) {
-								lines.push(`  ... and ${models.length - maxShow} more`);
-							}
-						} else {
-							lines.push("  (models listed via /v1/models — run /omni sync to add to Ctrl+P)");
-						}
-					}
-
-					if (group.nodeId) {
-						const node = nodes.find((n) => n.id === group.nodeId);
-						if (node) {
-							lines.push("");
-							lines.push("─── Node Config ───");
-							lines.push(`  Base URL: ${node.baseUrl}`);
-							lines.push(`  Prefix:   ${node.prefix}/`);
-							lines.push(`  Type:     ${node.type}`);
-						}
-					}
-
-					lines.push("");
-					lines.push(`Full management: ${DASHBOARD_URL} → Providers`);
-					ctx.ui.notify(lines.join("\n"), "info");
-				}
-				return;
-			}
-
-			// ──────────────── /omni sync ────────────────
 
 			if (sub === "sync") {
 				ctx.ui.notify("Syncing models from OmniRoute to Ctrl+P picker...", "info");
@@ -1207,7 +636,7 @@ export default function (pi: ExtensionAPI) {
 					if (!config.providers?.omni) {
 						ctx.ui.notify(
 							"No 'omni' provider found in models.json.\n" +
-							"Add one first — see the extension header docs for the format.",
+							"Run /omni setup first.",
 							"error"
 						);
 						return;
@@ -1216,10 +645,9 @@ export default function (pi: ExtensionAPI) {
 					const oldCount = config.providers.omni.models?.length || 0;
 					config.providers.omni.models = allModels;
 					fs.writeFileSync(path, JSON.stringify(config, null, 2));
-	
 
-					// Reload registry immediately — no restart needed
 					ctx.modelRegistry.refresh();
+					registerOmniProvider(pi);
 
 					ctx.ui.notify(
 						`✅ Synced ${allModels.length} models to Ctrl+P (was ${oldCount})`,
@@ -1231,303 +659,10 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			// ──────────────── /omni health (merged log-review + doctor) ────────────────
-
-			if (sub === "__disabled_health__") {
-				ctx.ui.notify(managementOnlyMessage("/omni health"), "warning");
-				return;
-				ctx.ui.notify("Running health check…", "info");
-
-				try {
-					const [combos, rawLogs] = await Promise.all([
-						listCombos(),
-						api("/api/usage/call-logs?limit=200"),
-					]);
-
-					// Filter to inference calls only
-					const logs: any[] = (rawLogs as any[]).filter(
-						(l: any) => l.path === "/v1/messages"
-					);
-
-					if (!logs.length) {
-						ctx.ui.notify("No call log history yet.", "info");
-						return;
-					}
-
-					// Build per-model stats keyed by "provider/model" as OmniRoute logs them
-					interface ModelStats {
-						attempts: number;
-						successes: number;
-						onlyContextErrors: boolean; // all failures are 413 (too large)
-						errors: Record<string, number>;
-						totalDuration: number;
-						errorMessages: string[];
-					}
-					const stats = new Map<string, ModelStats>();
-
-					for (const log of logs) {
-						const key = `${log.provider}/${log.model}`;
-						if (!stats.has(key)) {
-							stats.set(key, {
-								attempts: 0, successes: 0, onlyContextErrors: true,
-								errors: {}, totalDuration: 0, errorMessages: [],
-							});
-						}
-						const s = stats.get(key)!;
-						s.attempts++;
-						s.totalDuration += log.duration ?? 0;
-						if (log.status === 200) {
-							s.successes++;
-							s.onlyContextErrors = false;
-						} else {
-							const code = String(log.status);
-							s.errors[code] = (s.errors[code] ?? 0) + 1;
-							const errMsg: string = log.error ?? "";
-							// 413 = context too large — model works, session is just too big
-							if (log.status !== 413) s.onlyContextErrors = false;
-							if (errMsg && !s.errorMessages.find((m) => m === errMsg.slice(0, 80))) {
-								s.errorMessages.push(errMsg.slice(0, 80));
-							}
-						}
-					}
-
-					// Known prefix aliases: short combo prefix → full OmniRoute log provider name
-					const prefixMap: Record<string, string> = {
-						cx: "codex", kr: "kiro", kmc: "kimi-coding", qw: "qwen", ali: "alibaba",
-					};
-
-					// Match a combo model ID to call log stats.
-					// Tries exact match first, then resolves prefix aliases.
-					const findStats = (modelId: string): ModelStats | undefined => {
-						// Exact match
-						if (stats.has(modelId)) return stats.get(modelId);
-						// Resolve alias: cx/gpt-5.4 → codex/gpt-5.4
-						const prefix = modelId.split("/")[0];
-						const modelName = modelId.split("/").slice(1).join("/");
-						const longPrefix = prefixMap[prefix];
-						if (longPrefix) {
-							const aliased = `${longPrefix}/${modelName}`;
-							if (stats.has(aliased)) return stats.get(aliased);
-						}
-						// Reverse alias: codex/gpt-5.4 → check if logged as cx/gpt-5.4
-						for (const [short, long] of Object.entries(prefixMap)) {
-							if (prefix === long) {
-								const aliased = `${short}/${modelName}`;
-								if (stats.has(aliased)) return stats.get(aliased);
-							}
-						}
-						return undefined;
-					};
-
-					// Build report per combo
-					const lines: string[] = ["═══ OmniRoute Log Review ═══", `(last ${logs.length} inference calls)`, ""];
-					const removals: Array<{ comboId: string; comboName: string; modelId: string }> = [];
-
-					for (const combo of combos) {
-						lines.push(`─── ${combo.name} [${combo.strategy}] ───`);
-						const comboModels = combo.models.map((m) =>
-							typeof m === "string" ? m : m.model
-						);
-
-						for (const modelId of comboModels) {
-							const s = findStats(modelId);
-
-							if (!s) {
-								lines.push(`  ❓ ${modelId}  (no history)`);
-								continue;
-							}
-
-							const rate = Math.round((s.successes / s.attempts) * 100);
-							const avgMs = Math.round(s.totalDuration / s.attempts);
-							const errSummary = Object.entries(s.errors)
-								.map(([code, n]) => `${code}×${n}`)
-								.join(", ");
-
-							if (s.successes === 0 && s.onlyContextErrors) {
-								// All failures are 413 — model works, context was too large
-								lines.push(`  ⚠️  ${modelId}`);
-								lines.push(`     context too large for free tier (${s.attempts}× 413) — works in shorter sessions`);
-							} else if (s.successes === 0) {
-								// Genuinely broken
-								lines.push(`  ❌ ${modelId}`);
-								lines.push(`     0/${s.attempts} success · ${errSummary}`);
-								if (s.errorMessages[0]) lines.push(`     "${s.errorMessages[0]}"`);
-								lines.push(`     → suggest remove`);
-								removals.push({ comboId: combo.id, comboName: combo.name, modelId });
-							} else if (rate < 60) {
-								lines.push(`  ⚠️  ${modelId}`);
-								lines.push(`     ${s.successes}/${s.attempts} success (${rate}%) · avg ${avgMs}ms · ${errSummary}`);
-							} else if (avgMs > 30000) {
-								lines.push(`  ⏱  ${modelId}`);
-								lines.push(`     ${rate}% success · avg ${Math.round(avgMs / 1000)}s (slow)`);
-							} else {
-								lines.push(`  ✅ ${modelId}`);
-								lines.push(`     ${rate}% success · avg ${avgMs}ms`);
-							}
-						}
-
-						lines.push("");
-					}
-
-					ctx.ui.notify(lines.join("\n"), "info");
-
-					if (removals.length === 0) return;
-
-					// Fetch all available models from OmniRoute once for replacement suggestions
-					let availableModels: string[] = [];
-					try {
-						const data = await api("/v1/models");
-						availableModels = (data?.data ?? []).map((m: any) =>
-							typeof m === "string" ? m : m.id
-						).filter(Boolean);
-					} catch {}
-
-					// For each broken model, ask: remove or replace?
-					// Track pending edits: comboId → { remove: Set, add: string[] }
-					const edits = new Map<string, { id: string; name: string; remove: Set<string>; add: string[] }>();
-
-					for (const r of removals) {
-						// Models already in this combo (to avoid suggesting duplicates)
-						const currentCombo = combos.find((c) => c.id === r.comboId);
-						const alreadyIn = new Set(
-							(currentCombo?.models ?? []).map((m) =>
-								typeof m === "string" ? m : m.model
-							)
-						);
-
-						// Suggest models from the same provider prefix
-						const brokenPrefix = r.modelId.split("/")[0];
-						const suggestions = availableModels.filter(
-							(m) => m.startsWith(`${brokenPrefix}/`) && !alreadyIn.has(m) && m !== r.modelId
-						).slice(0, 8);
-
-						// Also offer models from other providers as alternatives
-						const otherSuggestions = availableModels.filter(
-							(m) => !m.startsWith(`${brokenPrefix}/`) && !alreadyIn.has(m)
-						).slice(0, 6);
-
-						const options = [
-							`❌ Remove (no replacement)`,
-							...(suggestions.length ? ["── Same provider ──", ...suggestions.map((m) => `→ ${m}`)] : []),
-							...(otherSuggestions.length ? ["── Other providers ──", ...otherSuggestions.map((m) => `→ ${m}`)] : []),
-							"⏭ Skip (keep as-is)",
-						];
-
-						const choice = await ctx.ui.select(
-							`[${r.comboName}] ${r.modelId} — remove or replace?`,
-							options
-						);
-
-						if (!choice || choice === "⏭ Skip (keep as-is)" || choice.startsWith("──")) continue;
-
-						if (!edits.has(r.comboId)) {
-							edits.set(r.comboId, { id: r.comboId, name: r.comboName, remove: new Set(), add: [] });
-						}
-						const edit = edits.get(r.comboId)!;
-						edit.remove.add(r.modelId);
-
-						if (choice.startsWith("→ ")) {
-							edit.add.push(choice.slice(2));
-						}
-						// "Remove" → remove only, no add
-					}
-
-					if (edits.size === 0) return;
-
-					// Apply all edits
-					const allCombos = await listCombos();
-					const results: string[] = [];
-
-					for (const { id, name, remove, add } of edits.values()) {
-						const combo = allCombos.find((c) => c.id === id);
-						if (!combo) continue;
-
-						const kept = combo.models
-							.map((m) => (typeof m === "string" ? m : m.model))
-							.filter((m) => !remove.has(m));
-						const updated = [...kept, ...add];
-
-						try {
-							await api(`/api/combos/${id}`, {
-								method: "PUT",
-								body: JSON.stringify({ models: updated }),
-							});
-							const removedList = [...remove].join(", ");
-							const addedList = add.length ? ` · added ${add.join(", ")}` : "";
-							results.push(`✅ ${name}: removed ${removedList}${addedList}`);
-						} catch (e: any) {
-							results.push(`❌ ${name}: ${e.message}`);
-						}
-					}
-
-					ctx.ui.notify(results.join("\n"), "info");
-				} catch (e: any) {
-					ctx.ui.notify(`Log review failed: ${e.message}`, "error");
-				}
-
-				// ── Config diagnostics (formerly /omni doctor) ──
-				ctx.ui.notify("Running config diagnostics…", "info");
-				try {
-					const [dCombos, dConns] = await Promise.all([listCombos(), listConnections()]);
-					const issues = [
-						...checkApiKey(),
-						...findConnPrefixedCombos(dCombos, dConns),
-						...findEmptyCombos(dCombos),
-						...findFragileCombos(dCombos, dConns),
-						...findMissingProjectIds(dConns),
-						...findExpiringAccounts(dConns),
-					];
-
-					if (issues.length === 0) {
-						ctx.ui.notify("✅ Config diagnostics: no issues found.", "info");
-					} else {
-						const diagLines = ["═══ Config Diagnostics ═══", ""];
-						for (let i = 0; i < issues.length; i++) {
-							const issue = issues[i];
-							const icon = issue.severity === "error" ? "❌" : issue.severity === "warning" ? "⚠️" : "ℹ️";
-							const fixTag = issue.fix ? " [auto-fixable]" : "";
-							diagLines.push(`${icon} ${i + 1}. ${issue.message}${fixTag}`);
-							diagLines.push("");
-						}
-						ctx.ui.notify(diagLines.join("\n"), "info");
-
-						const fixable = issues.filter((i) => i.fix);
-						if (fixable.length > 0) {
-							const fixChoice = await ctx.ui.select(
-								`${fixable.length} issue(s) can be auto-fixed. Proceed?`,
-								["Yes — fix all", "Pick individually", "No — skip"]
-							);
-							if (fixChoice?.startsWith("Yes")) {
-								const fixResults: string[] = [];
-								for (const issue of fixable) {
-									try { fixResults.push(await issue.fix!()); }
-									catch (e: any) { fixResults.push(`❌ Fix failed: ${e.message}`); }
-								}
-								ctx.ui.notify(fixResults.join("\n"), "info");
-							} else if (fixChoice === "Pick individually") {
-								for (const issue of fixable) {
-									const apply = await ctx.ui.select(issue.message, ["Fix this", "Skip"]);
-									if (apply === "Fix this") {
-										try { ctx.ui.notify(await issue.fix!(), "info"); }
-										catch (e: any) { ctx.ui.notify(`❌ Fix failed: ${e.message}`, "error"); }
-									}
-								}
-							}
-						}
-					}
-				} catch (e: any) {
-					ctx.ui.notify(`Diagnostics failed: ${e.message}`, "error");
-				}
-				return;
-			}
-
-			// ──────────────── /omni setup ────────────────
-
 			if (sub === "setup") {
 				const fs = require("fs");
 				const path = modelsJsonPath();
 
-				// Get OmniRoute URL
 				const urlInput = await ctx.ui.input(
 					"OmniRoute URL",
 					"e.g. http://localhost:20128"
@@ -1544,7 +679,6 @@ export default function (pi: ExtensionAPI) {
 				if (apiKey === undefined) return;
 				const trimmedApiKey = apiKey.trim();
 
-				// Test connectivity
 				try {
 					const res = await fetch(`${baseUrl}/v1/models`, {
 						headers: trimmedApiKey ? { Authorization: `Bearer ${trimmedApiKey}` } : {},
@@ -1563,7 +697,6 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 
-				// Save configuration
 				try {
 					let config: any = {};
 					try {
@@ -1573,7 +706,7 @@ export default function (pi: ExtensionAPI) {
 					if (!config.providers) config.providers = {};
 					config.providers.omni = {
 						baseUrl,
-						api: "openai-completions",
+						api: OMNI_PROMPT_TOOLS_API,
 						apiKey: trimmedApiKey,
 						models: [],
 					};
@@ -1582,9 +715,11 @@ export default function (pi: ExtensionAPI) {
 
 					OMNI_URL = baseUrl;
 					DASHBOARD_URL = baseUrl;
+					registerOmniProvider(pi);
 
 					ctx.ui.notify(
-						`✅ OmniRoute setup complete and saved to models.json\n\nRun /omni sync to pull models into the Ctrl+P picker.`,
+						"✅ OmniRoute setup complete and saved to models.json\n\n" +
+						"Run /omni sync to pull models into the Ctrl+P picker.",
 						"info"
 					);
 				} catch (e: any) {
@@ -1593,71 +728,17 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			// ──────────────── /omni dashboard ────────────────
-
 			if (sub === "dashboard" || sub === "dash") {
 				ctx.ui.notify(
 					[
 						`OmniRoute Dashboard: ${DASHBOARD_URL}`,
 						"",
-						"Open in your browser for:",
-						"  • Create/edit combos with model reordering",
-						"  • Provider OAuth re-authentication",
-						"  • Add built-in provider accounts",
-						"  • Model analytics & request metrics",
-						"  • Request logs & debugging",
+						"Open in your browser to manage combos, providers, usage, and request logs.",
 					].join("\n"),
 					"info"
 				);
 				return;
 			}
-
-			// ──────────────── /omni limits ────────────────
-
-			if (sub === "__disabled_limits__") {
-				ctx.ui.notify(managementOnlyMessage("/omni limits"), "warning");
-				return;
-				try {
-					ctx.ui.setStatus("omni", "Fetching quotas…");
-					const data = await api("/api/usage/quota");
-					const providers = data?.providers || [];
-					const lines: string[] = ["═══ OmniRoute Usage Quotas ═══", ""];
-
-					if (providers.length === 0) {
-						lines.push("No active provider connections found.");
-					}
-
-					for (const p of providers) {
-						const pct = typeof p.percentRemaining === "number"
-							? Math.round(p.percentRemaining) : 100;
-						const filled = Math.round((100 - pct) / 5);
-						const bar = "█".repeat(filled) + "░".repeat(20 - filled);
-						const reset = p.resetAt
-							? ` · resets ${p.resetAt.slice(0, 16).replace("T", " ")}`
-							: "";
-						const token = p.tokenStatus !== "valid"
-							? ` ⚠️ token:${p.tokenStatus}` : "";
-
-						if (pct <= 0) {
-							lines.push(`  ❌ ${p.provider}/${p.name}: EXHAUSTED${reset}`);
-						} else if (pct <= 20) {
-							lines.push(`  ⚠️  ${p.provider}/${p.name}: [${bar}] ${pct}% left${reset}${token}`);
-						} else {
-							lines.push(`  ${p.provider}/${p.name}: [${bar}] ${pct}% left${reset}${token}`);
-						}
-					}
-
-					lines.push("");
-					ctx.ui.notify(lines.join("\\n"), "info");
-					ctx.ui.setStatus("omni", "OmniRoute ✓");
-				} catch (e: any) {
-					ctx.ui.notify(`Failed to fetch limits: ${e.message}`, "error");
-					ctx.ui.setStatus("omni", "OmniRoute ✓");
-				}
-				return;
-			}
-
-			// ──────────────── Unknown ────────────────
 
 			ctx.ui.notify(
 				`Unknown: /omni ${sub}\n\nAvailable: sync, setup, dashboard`,
