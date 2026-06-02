@@ -205,11 +205,52 @@ function shouldUsePromptTools(model: Pick<Model<any>, "id" | "name" | "provider"
 	);
 }
 
-let protocolCache: { key: string; text: string } | undefined;
+const PROMPT_TOOL_FULL_REFRESH_TURNS = 6;
 
-/** Stable cache key for the active tool set; avoids rebuilding identical prompt protocol each turn. */
+type PromptToolProtocolState = {
+	toolSignature: string;
+	protocolId: string;
+	promptToolTurns: number;
+	lastFullProtocolTurn: number;
+	forceFullNextTurn: boolean;
+};
+
+type PromptToolProtocolSelection = {
+	text: string;
+	sentFull: boolean;
+};
+
+/**
+ * Runtime-only refresh state for prompt-tool instructions.
+ *
+ * Pi forwards `options.sessionId` to custom provider stream handlers, so we scope state by
+ * session + model. This keeps one session/model from borrowing stale refresh counters from
+ * another while avoiding any protocol persistence in the saved Pi conversation history.
+ */
+const promptToolProtocolStates = new Map<string, PromptToolProtocolState>();
+let fullProtocolCache: { key: string; text: string } | undefined;
+
+/** Stable cache key for the active tool set; any tool/schema change forces a fresh full protocol. */
 function toolsSignature(tools: Tool[]): string {
 	return JSON.stringify(tools.map((t) => [t.name, t.description, t.parameters]));
+}
+
+/** Small deterministic hash used only for human-readable protocol IDs in reminders. */
+function stableHash(input: string): string {
+	let hash = 2166136261;
+	for (let i = 0; i < input.length; i++) {
+		hash ^= input.charCodeAt(i);
+		hash = Math.imul(hash, 16777619);
+	}
+	return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function protocolIdForSignature(signature: string): string {
+	return `pi-tools-v1:${stableHash(signature)}`;
+}
+
+function promptToolStateKey(model: Model<any>, options?: SimpleStreamOptions): string {
+	return [options?.sessionId || "no-session", model.provider, model.id].join(":");
 }
 
 function compactToolDescription(description: unknown): string {
@@ -225,13 +266,21 @@ function compactToolParameters(parameters: unknown): string {
 	}
 }
 
-/** Render Pi's structured tools as compact text instructions for chat-only models. */
-function renderToolProtocol(tools: Tool[]): string {
-	const key = toolsSignature(tools);
-	if (protocolCache && protocolCache.key === key) return protocolCache.text;
+/**
+ * Render the full prompt-tool protocol.
+ *
+ * This contains every active Pi tool, including extension/custom tools, with compact minified
+ * parameter schemas. It is intentionally not placed into `messages`; it is only appended to the
+ * outbound system prompt for the current provider request.
+ */
+function renderFullToolProtocol(tools: Tool[], protocolId: string): string {
+	const signature = toolsSignature(tools);
+	const key = `full:${protocolId}:${signature}`;
+	if (fullProtocolCache && fullProtocolCache.key === key) return fullProtocolCache.text;
 
 	const lines: string[] = [
 		"# Pi prompt tools",
+		`Protocol id: ${protocolId}`,
 		"Native/internal tool calls are unavailable for this chat-only model.",
 		"To call tools, the entire assistant message must be only <tool_call> block(s), no prose/markdown/extra text.",
 		"If any extra text appears beside <tool_call>, it is normal text and no tool executes.",
@@ -248,8 +297,64 @@ function renderToolProtocol(tools: Tool[]): string {
 	}
 
 	const text = lines.join("\n");
-	protocolCache = { key, text };
+	fullProtocolCache = { key, text };
 	return text;
+}
+
+/**
+ * Render the cheap steady-state reminder.
+ *
+ * Most prompt-tool turns use this instead of repeating every schema. The full protocol is resent
+ * every PROMPT_TOOL_FULL_REFRESH_TURNS turns, whenever the tool set changes, or after parse
+ * confusion so chat-only web models can recover when they forget exact rules/arguments.
+ */
+function renderToolProtocolReminder(tools: Tool[], protocolId: string): string {
+	return [
+		"# Pi prompt tools reminder",
+		`Use protocol ${protocolId}.`,
+		"Tool call format: <tool_call>{\"name\":\"tool_name\",\"arguments\":{}}</tool_call>",
+		"Tool calls must be standalone assistant messages: no prose/markdown/extra text.",
+		"Extra text beside <tool_call> means no tool executes.",
+		`Available tool names: ${tools.map((tool) => tool.name).join(", ")}`,
+	].join("\n");
+}
+
+/** Choose full vs reminder protocol for this session/model/tool set and advance turn state. */
+function selectPromptToolProtocol(
+	model: Model<any>,
+	tools: Tool[],
+	options?: SimpleStreamOptions,
+): PromptToolProtocolSelection {
+	const key = promptToolStateKey(model, options);
+	const signature = toolsSignature(tools);
+	const protocolId = protocolIdForSignature(signature);
+	const current = promptToolProtocolStates.get(key);
+	const nextTurn = current ? current.promptToolTurns + 1 : 1;
+	const toolSetChanged = !current || current.toolSignature !== signature;
+	const refreshDue = current
+		? nextTurn - current.lastFullProtocolTurn >= PROMPT_TOOL_FULL_REFRESH_TURNS
+		: true;
+	const sendFull = toolSetChanged || refreshDue || current?.forceFullNextTurn === true;
+
+	promptToolProtocolStates.set(key, {
+		toolSignature: signature,
+		protocolId,
+		promptToolTurns: nextTurn,
+		lastFullProtocolTurn: sendFull ? nextTurn : current?.lastFullProtocolTurn ?? nextTurn,
+		forceFullNextTurn: false,
+	});
+
+	return {
+		text: sendFull
+			? renderFullToolProtocol(tools, protocolId)
+			: renderToolProtocolReminder(tools, protocolId),
+		sentFull: sendFull,
+	};
+}
+
+function forceFullProtocolNextTurn(model: Model<any>, options?: SimpleStreamOptions): void {
+	const state = promptToolProtocolStates.get(promptToolStateKey(model, options));
+	if (state) state.forceFullNextTurn = true;
 }
 
 /** Extract text blocks and drop unsupported content like images for plain chat endpoints. */
@@ -326,22 +431,32 @@ function coerceArguments(value: unknown): Record<string, any> {
 	return {};
 }
 
-/** Parse standalone <tool_call> messages and preserve parse errors as model-visible feedback. */
-function parseToolCalls(text: string): {
+type ParseToolCallsResult = {
 	prose: string;
 	calls: { name: string; arguments: Record<string, any> }[];
 	errors: string[];
-} {
+	mixedToolCallText: boolean;
+};
+
+/**
+ * Parse standalone <tool_call> messages and preserve parse errors as model-visible feedback.
+ *
+ * Mixed prose + <tool_call> remains safe: it is returned as normal prose and no tool executes.
+ * The `mixedToolCallText` flag lets the next turn re-send the full protocol so the model can
+ * recover from that confusion without showing noisy warnings for documentation/examples.
+ */
+function parseToolCalls(text: string): ParseToolCallsResult {
 	const calls: { name: string; arguments: Record<string, any> }[] = [];
 	const errors: string[] = [];
 	const original = text.trim();
-	if (!original) return { prose: "", calls, errors };
+	if (!original) return { prose: "", calls, errors, mixedToolCallText: false };
 
+	const hasToolCallText = /<tool_call>[\s\S]*?<\/tool_call>/.test(text);
 	TOOL_CALL_RE.lastIndex = 0;
 	const remainder = text.replace(TOOL_CALL_RE, "").trim();
 	if (remainder) {
 		// Safety: examples or accidental <tool_call> snippets in prose must not execute.
-		return { prose: original, calls: [], errors: [] };
+		return { prose: original, calls: [], errors: [], mixedToolCallText: hasToolCallText };
 	}
 
 	let match: RegExpExecArray | null;
@@ -360,8 +475,10 @@ function parseToolCalls(text: string): {
 		}
 	}
 
-	if (calls.length === 0 && errors.length === 0) return { prose: original, calls, errors };
-	return { prose: "", calls, errors };
+	if (calls.length === 0 && errors.length === 0) {
+		return { prose: original, calls, errors, mixedToolCallText: false };
+	}
+	return { prose: "", calls, errors, mixedToolCallText: false };
 }
 
 /**
@@ -398,9 +515,14 @@ function streamWithPromptTools(
 			stream.push({ type: "start", partial: output });
 
 			const tools = context.tools ?? [];
+			const protocol = tools.length > 0
+				? selectPromptToolProtocol(model, tools, options)
+				: undefined;
 			const innerContext: Context = {
-				systemPrompt: tools.length > 0
-					? `${context.systemPrompt ?? ""}\n\n${renderToolProtocol(tools)}`.trim()
+				// Prompt-tool protocol stays ephemeral: it is appended only to this outbound
+				// provider request, never to flattened message history or saved Pi session entries.
+				systemPrompt: protocol
+					? `${context.systemPrompt ?? ""}\n\n${protocol.text}`.trim()
 					: context.systemPrompt,
 				messages: flattenMessages(context.messages),
 				tools: [],
@@ -426,8 +548,14 @@ function streamWithPromptTools(
 			}
 
 			const rawText = textOf(innerResult.content as TextContent[]);
-			const parsed = tools.length > 0 ? parseToolCalls(rawText) : { prose: rawText, calls: [], errors: [] as string[] };
+			const parsed = tools.length > 0
+				? parseToolCalls(rawText)
+				: { prose: rawText, calls: [], errors: [] as string[], mixedToolCallText: false };
 			let prose = parsed.prose;
+
+			if (parsed.errors.length > 0 || parsed.mixedToolCallText) {
+				forceFullProtocolNextTurn(model, options);
+			}
 
 			if (parsed.errors.length > 0) {
 				const note = [
