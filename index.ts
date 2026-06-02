@@ -397,6 +397,7 @@ function streamWithPromptTools(
 
 			const innerModel: Model<any> = { ...model, api: UNDERLYING_API };
 			const inner = provider.streamSimple(innerModel, innerContext, options);
+			// Prompt-tool mode is intentionally buffered: complete text is needed to parse <tool_call> blocks safely.
 			const innerResult = await inner.result();
 
 			output.usage = { ...innerResult.usage };

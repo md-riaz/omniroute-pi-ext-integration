@@ -47,7 +47,7 @@ bb-web/gpt-4-turbo
 ds-web/deepseek-v4-pro
 ```
 
-For these models, the extension keeps the same `omni` provider and `/model` workflow, but internally switches to prompt-emulated tool calling.
+For these models, the extension keeps the same Pi provider (`omni`) and `/model` workflow, but internally switches to prompt-emulated tool calling.
 
 ### Native tool mode
 
@@ -64,6 +64,8 @@ Pi agent
 ### Prompt tool mode
 
 Used when a model is chat-only or marked as not supporting native tool calls.
+
+Prompt tool mode is intentionally buffered: the extension waits for the full model response before showing text, because it must parse complete `<tool_call>` blocks before emitting Pi-native tool events.
 
 ```text
 Pi agent
@@ -95,7 +97,7 @@ Tool results are fed back in history as text:
 
 Prompt tool mode is enabled when either condition is true:
 
-1. The model ID/name/provider/OmniRoute `owned_by` marker contains `-web` during sync.
+1. The upstream model metadata contains `-web` during sync, such as OmniRoute model ID/name, `owned_by`, or model provider label. This does not change the Pi provider ID, which remains `omni`.
 2. The synced `models.json` model entry contains:
 
 ```json
@@ -135,7 +137,7 @@ The extension routes automatically:
 
 | Model kind | Detection | Tool mode |
 |---|---|---|
-| Web-synced model | ID/name/provider or OmniRoute `owned_by` contains `-web` | Prompt-emulated tools |
+| Web-synced model | Upstream model ID/name, OmniRoute `owned_by`, or model provider label contains `-web` | Prompt-emulated tools |
 | Explicit chat-only model | `tool_calling: false` in `models.json` | Prompt-emulated tools |
 | Normal model | No fallback marker | Native tools |
 
