@@ -261,8 +261,10 @@ function renderToolCallBlock(tc: ToolCall): string {
 	return `<tool_call>\n${JSON.stringify({ name: tc.name, arguments: tc.arguments })}\n</tool_call>`;
 }
 
+type FlattenableMessage = Message | { role: "system"; content: string | TextContent[]; timestamp?: number };
+
 /** Flatten native Pi message history into user/assistant text history for non-tool-capable chat APIs. */
-function flattenMessages(messages: Message[]): Message[] {
+function flattenMessages(messages: FlattenableMessage[]): Message[] {
 	const out: Message[] = [];
 	const pushText = (role: "user" | "assistant", text: string) => {
 		if (!text.trim()) return;
@@ -280,13 +282,18 @@ function flattenMessages(messages: Message[]): Message[] {
 			pushText("user", textOf(msg.content));
 		} else if (msg.role === "assistant") {
 			const prose = textOf(msg.content);
-			const calls = msg.content.filter((c): c is ToolCall => c.type === "toolCall");
+			const calls = Array.isArray(msg.content)
+				? msg.content.filter((c): c is ToolCall => c.type === "toolCall")
+				: [];
 			const parts = [prose, ...calls.map(renderToolCallBlock)].filter((s) => s.trim());
 			pushText("assistant", parts.join("\n\n"));
 		} else if (msg.role === "toolResult") {
 			const body = textOf(msg.content);
 			const tag = msg.isError ? "tool_result error" : "tool_result";
 			pushText("user", `<${tag} tool="${msg.toolName}" id="${msg.toolCallId}">\n${body}\n</tool_result>`);
+		} else if (msg.role === "system") {
+			// Pi normally uses context.systemPrompt, but preserve unexpected system messages defensively.
+			pushText("user", `<system>\n${textOf(msg.content)}\n</system>`);
 		}
 	}
 	return out;

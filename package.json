@@ -24,7 +24,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --skipLibCheck --types node index.ts",
-    "smoke": "node -e \"import('./index.ts').then(()=>console.log('import ok')).catch(e=>{console.error(e);process.exit(1)})\""
+    "smoke": "node --experimental-strip-types -e \"import(\\\"./index.ts\\\").then(()=>console.log(\\\"import ok\\\")).catch(e=>{console.error(e);process.exit(1)})\""
   },
   "author": "md-riaz",
   "license": "MIT",
