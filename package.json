@@ -22,6 +22,10 @@
       "./index.ts"
     ]
   },
+  "scripts": {
+    "typecheck": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --skipLibCheck --types node index.ts",
+    "smoke": "node -e \"import('./index.ts').then(()=>console.log('import ok')).catch(e=>{console.error(e);process.exit(1)})\""
+  },
   "author": "md-riaz",
   "license": "MIT",
   "repository": {
@@ -34,5 +38,9 @@
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.60.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "typescript": "^6.0.3"
   }
 }
