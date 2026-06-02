@@ -87,7 +87,8 @@ function registerOmniProvider(pi: ExtensionAPI): void {
 		pi.registerProvider("omni", {
 			name: "OmniRoute",
 			baseUrl: (provider.baseUrl || OMNI_URL).replace(/\/$/, ""),
-			apiKey: provider.apiKey || " ",
+			// Pi/OpenAI SDK require a non-empty apiKey; OmniRoute may ignore this dummy for public/local setups.
+			apiKey: provider.apiKey || "omniroute-public",
 			api: OMNI_PROMPT_TOOLS_API,
 			streamSimple: streamOmni,
 			models: (provider.models || []).map((model: any) => ({

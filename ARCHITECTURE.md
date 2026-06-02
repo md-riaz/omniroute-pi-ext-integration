@@ -145,6 +145,10 @@ This makes Pi's normal agent loop execute tools, even though upstream model only
 - Small models may emit malformed JSON; parse errors are returned as visible assistant text so the model can self-correct next turn.
 - Prompt tool calls are only as reliable as model instruction following.
 
+## API Key Handling
+
+`/omni setup` lets the API key be blank for local/public OmniRoute deployments. Pi's provider registry and OpenAI-compatible SDK path still require a non-empty API key string when registering custom models, so provider registration uses a harmless dummy value (`omniroute-public`) only when the saved key is empty. Real OmniRoute requests use the saved key when present.
+
 ## Extension Boundaries
 
 This repo does not implement OmniRoute itself. It only:
