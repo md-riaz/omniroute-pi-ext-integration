@@ -30,7 +30,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/md-riaz/omniroute-pi-ext-integration.git"
+    "url": "git+https://github.com/md-riaz/omniroute-pi-ext-integration.git"
   },
   "homepage": "https://github.com/md-riaz/omniroute-pi-ext-integration#readme",
   "bugs": {

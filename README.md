@@ -1,5 +1,8 @@
 # OmniRoute Pi Extension
 
+[![npm version](https://img.shields.io/npm/v/omniroute-pi-ext-integration.svg?style=flat-square)](https://www.npmjs.com/package/omniroute-pi-ext-integration)
+[![npm downloads](https://img.shields.io/npm/dm/omniroute-pi-ext-integration.svg?style=flat-square)](https://www.npmjs.com/package/omniroute-pi-ext-integration)
+
 A seamless [Pi Coding Agent](https://github.com/earendil-works/pi/tree/main/packages/coding-agent) extension that brings [OmniRoute](https://github.com/diegosouzapw/OmniRoute) — the ultimate AI gateway — directly into your editor environment.
 
 Connect to your local or remote OmniRoute server, browse models, manage combos, check quotas, and intelligently route your Pi queries across 44+ LLM providers.
@@ -17,6 +20,14 @@ Connect to your local or remote OmniRoute server, browse models, manage combos, 
 - 📉 **Quota Management**: Live usage tracking mapped directly to OmniRoute's global quota endpoints.
 
 ## Installation
+
+Install the package directly from NPM:
+
+```bash
+pi install omniroute-pi-ext-integration
+```
+
+Or install the latest development version directly from GitHub:
 
 ```bash
 pi install git:github.com/md-riaz/omniroute-pi-ext-integration
