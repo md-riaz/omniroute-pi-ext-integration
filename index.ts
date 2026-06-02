@@ -212,53 +212,39 @@ function toolsSignature(tools: Tool[]): string {
 	return JSON.stringify(tools.map((t) => [t.name, t.description, t.parameters]));
 }
 
-/** Render Pi's structured tools as text instructions for chat-only models. */
+function compactToolDescription(description: unknown): string {
+	if (typeof description !== "string") return "";
+	return description.replace(/\s+/g, " ").trim().slice(0, 180);
+}
+
+function compactToolParameters(parameters: unknown): string {
+	try {
+		return JSON.stringify(parameters ?? {});
+	} catch {
+		return "{}";
+	}
+}
+
+/** Render Pi's structured tools as compact text instructions for chat-only models. */
 function renderToolProtocol(tools: Tool[]): string {
 	const key = toolsSignature(tools);
 	if (protocolCache && protocolCache.key === key) return protocolCache.text;
 
 	const lines: string[] = [
-		"# Tool calling protocol",
-		"",
-		"You are connected to Pi through a chat-only adapter. Native/internal tool calling is NOT available.",
-		"The only valid way to call tools is to write literal text <tool_call> blocks as a complete standalone assistant message.",
-		"Do not use any built-in, hidden, XML, function-call, or provider-specific tool-call channel.",
-		"If you need a tool, your ENTIRE assistant message must contain only one or more",
-		"tool-call blocks in EXACTLY this format, with no prose, explanation, markdown fences, or extra text:",
-		"",
-		"<tool_call>",
-		'{"name": "<tool_name>", "arguments": { ... }}',
-		"</tool_call>",
-		"",
-		"Rules:",
-		"- Use ONLY the <tool_call> text-block protocol shown here for tool calls.",
-		"- A tool-call message is valid only when the whole assistant message is <tool_call> block(s) plus whitespace.",
-		"- Do not include reasoning, comments, examples, or normal answer text in the same message as <tool_call>.",
-		"- Text that contains <tool_call> alongside any extra prose is treated as normal text and will NOT execute tools.",
-		"- Whenever you decide a tool is needed, prefer this Pi coding-agent <tool_call> procedure over any chat/internal tool-calling mechanism.",
-		"- Do not use chat/internal tool calling unless the user explicitly asks for it or the Pi coding-agent <tool_call> procedure cannot perform the requested action.",
-		"- The JSON must be valid and `arguments` must match the tool's parameter schema.",
-		"- Put the JSON directly inside the tags. Do NOT wrap it in ```json markdown fences.",
-		'- `arguments` must be a JSON object literal, not a string (use {"path":"x"}, not "{\\"path\\":\\"x\\"}").',
-		"- Emit multiple <tool_call> blocks to call several tools in one turn.",
-		"- After emitting tool calls, STOP and wait; tool results arrive as <tool_result> messages.",
-		"- Never claim you used a tool unless a <tool_result> message was returned.",
-		"- Never invent command output, file contents, or tool results.",
-		"- If it is unclear whether the user wants chat/internal tool calling or Pi coding-agent tool calling, ask a clarifying question before acting.",
-		"- If no tool is needed, answer normally with NO <tool_call> block.",
-		"",
-		"## Available tools",
-		"",
+		"# Pi prompt tools",
+		"Native/internal tool calls are unavailable for this chat-only model.",
+		"To call tools, the entire assistant message must be only <tool_call> block(s), no prose/markdown/extra text.",
+		"If any extra text appears beside <tool_call>, it is normal text and no tool executes.",
+		"Format: <tool_call>{\"name\":\"tool_name\",\"arguments\":{}}</tool_call>",
+		"Use valid JSON. arguments must be an object. After tool calls, stop and wait for <tool_result>.",
+		"Never invent tool output. If no tool is needed, answer normally without <tool_call>.",
+		"Available tools:",
 	];
 
 	for (const tool of tools) {
-		lines.push(`### ${tool.name}`);
-		lines.push(tool.description);
-		lines.push("Parameters (JSON Schema):");
-		lines.push("```json");
-		lines.push(JSON.stringify(tool.parameters, null, 2));
-		lines.push("```");
-		lines.push("");
+		const description = compactToolDescription(tool.description);
+		const parameters = compactToolParameters(tool.parameters);
+		lines.push(`- ${tool.name}${description ? `: ${description}` : ""}; parameters=${parameters}`);
 	}
 
 	const text = lines.join("\n");
