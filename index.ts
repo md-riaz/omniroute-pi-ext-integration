@@ -133,7 +133,11 @@ async function api(path: string, opts?: RequestInit): Promise<any> {
 /** Quick health probe used for status bar and /omni status. */
 async function checkOmniRouteHealth(): Promise<boolean> {
 	try {
-		const res = await fetch(`${OMNI_URL}/v1/models`, { signal: AbortSignal.timeout(3000) });
+		const apiKey = getApiKey();
+		const res = await fetch(`${OMNI_URL}/v1/models`, {
+			headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+			signal: AbortSignal.timeout(3000),
+		});
 		return res.ok;
 	} catch {
 		return false;
@@ -666,22 +670,32 @@ export default function (pi: ExtensionAPI) {
 				if (!urlInput) return;
 				const baseUrl = urlInput.trim().replace(/\/$/, "");
 
+				// Ask for API Key before testing connectivity: some remote OmniRoute
+				// instances require Authorization even for /v1/models.
+				const apiKey = await ctx.ui.input(
+					"OmniRoute API Key",
+					"Enter your API key or press enter to leave blank"
+				);
+				if (apiKey === undefined) return;
+				const trimmedApiKey = apiKey.trim();
+
 				try {
-					const res = await fetch(`${baseUrl}/v1/models`, { signal: AbortSignal.timeout(3000) });
+					const res = await fetch(`${baseUrl}/v1/models`, {
+						headers: trimmedApiKey ? { Authorization: `Bearer ${trimmedApiKey}` } : {},
+						signal: AbortSignal.timeout(3000),
+					});
 					if (!res.ok) {
-						ctx.ui.notify(`OmniRoute unreachable at ${baseUrl} (${res.status})`, "error");
+						const body = (await res.text()).slice(0, 200);
+						ctx.ui.notify(
+							`OmniRoute unreachable at ${baseUrl} (${res.status})${body ? `: ${body}` : ""}`,
+							"error"
+						);
 						return;
 					}
 				} catch (e: any) {
 					ctx.ui.notify(`OmniRoute unreachable at ${baseUrl}: ${e.message}`, "error");
 					return;
 				}
-
-				const apiKey = await ctx.ui.input(
-					"OmniRoute API Key",
-					"Enter your API key or press enter to leave blank"
-				);
-				if (apiKey === undefined) return;
 
 				try {
 					let config: any = {};
@@ -693,7 +707,7 @@ export default function (pi: ExtensionAPI) {
 					config.providers.omni = {
 						baseUrl,
 						api: OMNI_PROMPT_TOOLS_API,
-						apiKey: apiKey.trim(),
+						apiKey: trimmedApiKey,
 						models: [],
 					};
 

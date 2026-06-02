@@ -8,7 +8,7 @@ This file is the first stop for AI agents. Read this before scanning the repo.
 
 It does three jobs:
 
-1. `/omni setup` saves OmniRoute URL/API key into Pi `models.json`.
+1. `/omni setup` saves OmniRoute URL/API key into Pi `models.json` and tests protected endpoints with the entered key.
 2. `/omni sync` fetches OmniRoute `/v1/models` and syncs them into Pi's `/model` picker.
 3. The extension registers an `omni` provider that routes tool calling automatically:
    - native tool-capable models use OpenAI-compatible native `tool_calls`
@@ -161,7 +161,7 @@ README.md
 
 ### Change setup behavior
 
-Update `/omni setup` handler near bottom of `index.ts`.
+Update `/omni setup` handler near bottom of `index.ts`. Preserve the current order: ask for API key before testing `/v1/models`, because protected OmniRoute servers may require Authorization for model listing.
 
 ### Change sync behavior
 

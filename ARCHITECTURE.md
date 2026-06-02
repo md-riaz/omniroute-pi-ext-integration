@@ -18,8 +18,8 @@ Pi CLI
 ```text
 /omni setup
   -> ask user for OmniRoute URL
-  -> verify URL with GET /v1/models
   -> ask user for API key
+  -> verify URL with authenticated GET /v1/models when key is present
   -> write ~/.pi/agent/models.json
   -> register/refresh omni provider
 ```
@@ -147,7 +147,7 @@ This makes Pi's normal agent loop execute tools, even though upstream model only
 
 ## API Key Handling
 
-`/omni setup` lets the API key be blank for local/public OmniRoute deployments. Pi's provider registry and OpenAI-compatible SDK path still require a non-empty API key string when registering custom models, so provider registration uses a harmless dummy value (`omniroute-public`) only when the saved key is empty. Real OmniRoute requests use the saved key when present.
+`/omni setup` asks for the API key before testing `/v1/models` because protected remote OmniRoute deployments can require Authorization even for model listing. The key may still be blank for local/public deployments. Pi's provider registry and OpenAI-compatible SDK path require a non-empty API key string when registering custom models, so provider registration uses a harmless dummy value (`omniroute-public`) only when the saved key is empty. Real OmniRoute requests use the saved key when present.
 
 ## Extension Boundaries
 

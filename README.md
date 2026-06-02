@@ -32,7 +32,7 @@ pi install git:github.com/md-riaz/omniroute-pi-ext-integration
    ```bash
    /omni setup
    ```
-3. **Enter Credentials:** Enter your OmniRoute Server URL and your API Key when prompted.
+3. **Enter Credentials:** Enter your OmniRoute Server URL and API key when prompted. The key is collected before connectivity testing so protected `/v1/models` endpoints can be verified.
 4. **Sync Models:** Run `/omni sync` to populate the `Ctrl+P` list with all your provider models and combos.
 5. **Switch Models Normally:** Use `/model` as usual. No separate prompt-tools provider is needed.
 
