@@ -11,7 +11,7 @@ Connect to your local or remote OmniRoute server, browse models, manage combos, 
 - 🔄 **Combo & Model Sync**: Instantly push all OmniRoute combos and available models into Pi’s `Ctrl+P` model picker with full metadata (context windows, max tokens, reasoning support, and vision capabilities).
 - 🛠️ **Prompt Tool Fallback for Chat-Only Models**: Models that do not support native `tool_calls` can still use Pi tools through prompt-emulated tool calling.
 - 🔁 **Same `/model` Workflow**: Switch models normally; the extension chooses native tools or prompt tools automatically.
-- 📊 **Real-time Routing Feedback**: Status bar dynamically shows which model *actually* served each response (via call logs).
+- 📊 **Selected Model Status**: Status bar shows the currently selected Pi/OmniRoute model ID. For OmniRoute combos, this shows the combo/model selected in Pi, not the underlying provider model that OmniRoute ultimately routed to.
 - 🧬 **Smart Sorting**: Syncing organizes your model list by provider/group (`owned_by`) for a cleaner `Ctrl+P` experience.
 - 🛠️ **Diagnostics & Health**: Spot expired tokens, connection failures, or disconnected providers right when Pi starts (management endpoints must be accessible).
 - 📉 **Quota Management**: Live usage tracking mapped directly to OmniRoute's global quota endpoints.
