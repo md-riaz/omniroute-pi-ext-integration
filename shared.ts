@@ -592,11 +592,13 @@ function forceFullProtocolNextTurn(model: Model<any>, options?: SimpleStreamOpti
 	if (state) state.forceFullNextTurn = true;
 }
 
-function textOf(content: string | (TextContent | { type: string })[]): string {
+function textOf(content: string | (TextContent | { type: string })[] | undefined | null): string {
+	if (!content) return "";
 	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
 	return content
-		.filter((c): c is TextContent => c.type === "text")
-		.map((c) => c.text)
+		.filter((c): c is TextContent => !!c && "type" in c && c.type === "text")
+		.map((c) => c.text ?? "")
 		.join("");
 }
 
@@ -642,17 +644,17 @@ const TOOL_CALL_RE = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g;
 
 function stripCodeFence(raw: string): string {
 	return raw
-		.replace(/^\s*```(?:json|JSON)?\s*\n?/, "")
+		.replace(/^\s*```[a-zA-Z]*\s*\n?/, "")
 		.replace(/\n?\s*```\s*$/, "")
 		.trim();
 }
 
 function coerceArguments(value: unknown): Record<string, any> {
-	if (value && typeof value === "object") return value as Record<string, any>;
+	if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, any>;
 	if (typeof value === "string") {
 		try {
 			const parsed = JSON.parse(value);
-			if (parsed && typeof parsed === "object") return parsed as Record<string, any>;
+			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, any>;
 		} catch {}
 	}
 	return {};
@@ -668,18 +670,19 @@ type ParseToolCallsResult = {
 function parseToolCalls(text: string): ParseToolCallsResult {
 	const calls: { name: string; arguments: Record<string, any> }[] = [];
 	const errors: string[] = [];
-	const original = text.trim();
+	const cleaned = stripCodeFence(text);
+	const original = cleaned.trim();
 	if (!original) return { prose: "", calls, errors, mixedToolCallText: false };
 
-	const openIdx = text.indexOf("<tool_call>");
-	const hasToolCallText = openIdx !== -1 && text.indexOf("</tool_call>", openIdx) !== -1;
+	const openIdx = cleaned.indexOf("<tool_call>");
+	const hasToolCallText = openIdx !== -1 && cleaned.indexOf("</tool_call>", openIdx) !== -1;
 	TOOL_CALL_RE.lastIndex = 0;
-	const remainder = text.replace(TOOL_CALL_RE, "").trim();
-	if (remainder) return { prose: original, calls: [], errors: [], mixedToolCallText: hasToolCallText };
+	const remainder = cleaned.replace(TOOL_CALL_RE, "").trim();
+	if (remainder) return { prose: text.trim(), calls: [], errors: [], mixedToolCallText: hasToolCallText };
 
 	let match: RegExpExecArray | null;
 	TOOL_CALL_RE.lastIndex = 0;
-	while ((match = TOOL_CALL_RE.exec(text)) !== null) {
+	while ((match = TOOL_CALL_RE.exec(cleaned)) !== null) {
 		const body = stripCodeFence(match[1]);
 		try {
 			const parsed = JSON.parse(body);
@@ -858,6 +861,7 @@ export async function createOmniExtension(pi: OmniPI, opts: AgentHomeOptions): P
 		const ok = await checkHealth(config);
 		ctx.ui.setStatus("omni", ok ? undefined : "OmniRoute unreachable");
 		if (!ok) ctx.ui.notify(`OmniRoute unreachable at ${config.serverUrl}. Run /omni sync after reconnecting.`, "warning");
+		if (healthTimer) clearInterval(healthTimer);
 		healthTimer = setInterval(async () => {
 			ctx.ui.setStatus("omni", (await checkHealth(loadConfig(agentHome))) ? undefined : "OmniRoute unreachable");
 		}, 60_000);
