@@ -461,18 +461,62 @@ async function testChat(config: OmniConfig, model: string): Promise<string> {
 }
 
 // ─── Prompt-tool system ───────────────────────────────────────────────────────
-let protocolCache: { key: string; text: string } | undefined;
+const PROMPT_TOOL_FULL_REFRESH_TURNS = 6;
+const PROMPT_TOOL_MAX_STATE_ENTRIES = 1000;
+
+type PromptToolProtocolState = {
+	toolSignature: string;
+	protocolId: string;
+	promptToolTurns: number;
+	lastFullProtocolTurn: number;
+	forceFullNextTurn: boolean;
+};
+
+const promptToolProtocolStates = new Map<string, PromptToolProtocolState>();
+let fullProtocolCache: { key: string; text: string } | undefined;
 
 function toolsSignature(tools: Tool[]): string {
 	return JSON.stringify(tools.map((t) => [t.name, t.description, t.parameters]));
 }
 
-function renderToolProtocol(tools: Tool[]): string {
-	const key = toolsSignature(tools);
-	if (protocolCache?.key === key) return protocolCache.text;
+function stableHash(input: string): string {
+	let hash = 2166136261;
+	for (let i = 0; i < input.length; i++) {
+		hash ^= input.charCodeAt(i);
+		hash = Math.imul(hash, 16777619);
+	}
+	return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function protocolIdForSignature(signature: string): string {
+	return `pi-tools-v1:${stableHash(signature)}`;
+}
+
+function promptToolStateKey(model: Model<any>, options?: SimpleStreamOptions): string {
+	return [options?.sessionId || "no-session", model.provider, model.id].join(":");
+}
+
+function compactToolDescription(description: unknown): string {
+	if (typeof description !== "string") return "";
+	return description.replace(/\s+/g, " ").trim().slice(0, 180);
+}
+
+function compactToolParameters(parameters: unknown): string {
+	try {
+		return JSON.stringify(parameters ?? {});
+	} catch {
+		return "{}";
+	}
+}
+
+function renderFullToolProtocol(tools: Tool[], protocolId: string): string {
+	const signature = toolsSignature(tools);
+	const key = `full:${protocolId}:${signature}`;
+	if (fullProtocolCache?.key === key) return fullProtocolCache.text;
 
 	const lines: string[] = [
 		"# Pi prompt tools",
+		`Protocol id: ${protocolId}`,
 		"Native/internal tool calls are unavailable for this chat-only model.",
 		"To call tools, the entire assistant message must be only <tool_call> block(s), no prose/markdown/extra text.",
 		"If any extra text appears beside <tool_call>, it is normal text and no tool executes.",
@@ -483,19 +527,69 @@ function renderToolProtocol(tools: Tool[]): string {
 	];
 
 	for (const tool of tools) {
-		const desc = typeof tool.description === "string" ? tool.description.replace(/\s+/g, " ").trim().slice(0, 180) : "";
-		let params: string;
-		try {
-			params = JSON.stringify(tool.parameters ?? {});
-		} catch {
-			params = "{}";
-		}
-		lines.push(`- ${tool.name}${desc ? `: ${desc}` : ""}; parameters=${params}`);
+		const desc = compactToolDescription(tool.description);
+		lines.push(`- ${tool.name}${desc ? `: ${desc}` : ""}; parameters=${compactToolParameters(tool.parameters)}`);
 	}
 
 	const text = lines.join("\n");
-	protocolCache = { key, text };
+	fullProtocolCache = { key, text };
 	return text;
+}
+
+function compactToolReminderHint(tool: Tool): string {
+	const params = compactToolParameters(tool.parameters);
+	return `${tool.name} parameters=${params.length > 300 ? `${params.slice(0, 300)}...` : params}`;
+}
+
+function renderToolProtocolReminder(tools: Tool[], protocolId: string): string {
+	return [
+		"# Pi prompt tools reminder",
+		`Use protocol ${protocolId}.`,
+		'Tool call format: <tool_call>{"name":"tool_name","arguments":{}}</tool_call>',
+		"Tool calls must be standalone assistant messages: no prose/markdown/extra text.",
+		"Extra text beside <tool_call> means no tool executes.",
+		"Compact argument hints:",
+		...tools.map(compactToolReminderHint),
+	].join("\n");
+}
+
+function selectPromptToolProtocol(
+	model: Model<any>,
+	tools: Tool[],
+	options?: SimpleStreamOptions,
+): { text: string } {
+	const key = promptToolStateKey(model, options);
+	const signature = toolsSignature(tools);
+	const protocolId = protocolIdForSignature(signature);
+	const current = promptToolProtocolStates.get(key);
+	const nextTurn = current ? current.promptToolTurns + 1 : 1;
+	const toolSetChanged = !current || current.toolSignature !== signature;
+	const refreshDue = current ? nextTurn - current.lastFullProtocolTurn >= PROMPT_TOOL_FULL_REFRESH_TURNS : true;
+	const sendFull = toolSetChanged || refreshDue || current?.forceFullNextTurn === true;
+
+	if (promptToolProtocolStates.size >= PROMPT_TOOL_MAX_STATE_ENTRIES && !promptToolProtocolStates.has(key)) {
+		const oldestKey = promptToolProtocolStates.keys().next().value;
+		if (oldestKey !== undefined) promptToolProtocolStates.delete(oldestKey);
+	}
+
+	promptToolProtocolStates.set(key, {
+		toolSignature: signature,
+		protocolId,
+		promptToolTurns: nextTurn,
+		lastFullProtocolTurn: sendFull ? nextTurn : current?.lastFullProtocolTurn ?? nextTurn,
+		forceFullNextTurn: false,
+	});
+
+	return {
+		text: sendFull
+			? renderFullToolProtocol(tools, protocolId)
+			: renderToolProtocolReminder(tools, protocolId),
+	};
+}
+
+function forceFullProtocolNextTurn(model: Model<any>, options?: SimpleStreamOptions): void {
+	const state = promptToolProtocolStates.get(promptToolStateKey(model, options));
+	if (state) state.forceFullNextTurn = true;
 }
 
 function textOf(content: string | (TextContent | { type: string })[]): string {
@@ -564,19 +658,24 @@ function coerceArguments(value: unknown): Record<string, any> {
 	return {};
 }
 
-function parseToolCalls(text: string): {
+type ParseToolCallsResult = {
 	prose: string;
 	calls: { name: string; arguments: Record<string, any> }[];
 	errors: string[];
-} {
+	mixedToolCallText: boolean;
+};
+
+function parseToolCalls(text: string): ParseToolCallsResult {
 	const calls: { name: string; arguments: Record<string, any> }[] = [];
 	const errors: string[] = [];
 	const original = text.trim();
-	if (!original) return { prose: "", calls, errors };
+	if (!original) return { prose: "", calls, errors, mixedToolCallText: false };
 
+	const openIdx = text.indexOf("<tool_call>");
+	const hasToolCallText = openIdx !== -1 && text.indexOf("</tool_call>", openIdx) !== -1;
 	TOOL_CALL_RE.lastIndex = 0;
 	const remainder = text.replace(TOOL_CALL_RE, "").trim();
-	if (remainder) return { prose: original, calls: [], errors: [] };
+	if (remainder) return { prose: original, calls: [], errors: [], mixedToolCallText: hasToolCallText };
 
 	let match: RegExpExecArray | null;
 	TOOL_CALL_RE.lastIndex = 0;
@@ -594,8 +693,8 @@ function parseToolCalls(text: string): {
 		}
 	}
 
-	if (calls.length === 0 && errors.length === 0) return { prose: original, calls, errors };
-	return { prose: "", calls, errors };
+	if (calls.length === 0 && errors.length === 0) return { prose: original, calls, errors, mixedToolCallText: false };
+	return { prose: "", calls, errors, mixedToolCallText: false };
 }
 
 function streamWithPromptTools(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
@@ -624,11 +723,12 @@ function streamWithPromptTools(model: Model<any>, context: Context, options?: Si
 			stream.push({ type: "start", partial: output });
 
 			const tools = context.tools ?? [];
+			const protocol = tools.length > 0 ? selectPromptToolProtocol(model, tools, options) : undefined;
 			const innerContext: Context = {
-				systemPrompt:
-					tools.length > 0
-						? `${context.systemPrompt ?? ""}\n\n${renderToolProtocol(tools)}`.trim()
-						: context.systemPrompt,
+				// Protocol is ephemeral: appended only to this outbound request, never into flattened history.
+				systemPrompt: protocol
+					? `${context.systemPrompt ?? ""}\n\n${protocol.text}`.trim()
+					: context.systemPrompt,
 				messages: flattenMessages(context.messages),
 				tools: [],
 			};
@@ -652,9 +752,14 @@ function streamWithPromptTools(model: Model<any>, context: Context, options?: Si
 			}
 
 			const rawText = textOf(innerResult.content as TextContent[]);
-			const parsed =
-				tools.length > 0 ? parseToolCalls(rawText) : { prose: rawText, calls: [], errors: [] as string[] };
+			const parsed = tools.length > 0
+				? parseToolCalls(rawText)
+				: { prose: rawText, calls: [], errors: [] as string[], mixedToolCallText: false };
 			let prose = parsed.prose;
+
+			if (parsed.errors.length > 0 || parsed.mixedToolCallText) {
+				forceFullProtocolNextTurn(model, options);
+			}
 
 			if (parsed.errors.length > 0) {
 				const note = [
