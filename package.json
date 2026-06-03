@@ -1,45 +1,63 @@
 {
-  "name": "omniroute-pi-ext-integration",
-  "version": "2.0.1",
-  "description": "Pi Coding Agent extension for OmniRoute — view combos, browse providers, and sync models with enriched metadata (context windows, max tokens, reasoning, and vision) to the Ctrl+P picker",
+  "name": "omniroute-agent-extension",
+  "version": "3.0.0",
+  "description": "OmniRoute extension for Pi Coding Agent (pi) and Oh My Pi (omp) — model sync and prompt-tool fallback for chat-only models",
   "keywords": [
+    "omp-plugin",
+    "oh-my-pi",
     "pi-package",
     "pi-coding-agent",
     "omniroute",
     "llm",
     "ai-gateway",
-    "extension",
-    "coding-agent"
+    "extension"
   ],
-  "main": "index.ts",
+  "type": "module",
   "files": [
-    "index.ts",
+    "shared.ts",
+    "omp.ts",
+    "pi.ts",
     "README.md",
     "LICENSE"
   ],
+  "omp": {
+    "extensions": [
+      "./omp.ts"
+    ]
+  },
   "pi": {
     "extensions": [
-      "./index.ts"
+      "./pi.ts"
     ]
   },
   "scripts": {
-    "typecheck": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --skipLibCheck --types node index.ts",
-    "smoke": "node --experimental-strip-types -e \"import(\\\"./index.ts\\\").then(()=>console.log(\\\"import ok\\\")).catch(e=>{console.error(e);process.exit(1)})\""
+    "typecheck": "tsc --noEmit --allowImportingTsExtensions --target ES2022 --module NodeNext --moduleResolution NodeNext --skipLibCheck --types node shared.ts omp.ts pi.ts",
+    "smoke": "node --experimental-strip-types -e \"import('./omp.ts').then(()=>console.log('omp ok')).catch(e=>{console.error(e);process.exit(1)})\" && node --experimental-strip-types -e \"import('./pi.ts').then(()=>console.log('pi ok')).catch(e=>{console.error(e);process.exit(1)})\""
   },
   "author": "md-riaz",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/md-riaz/omniroute-pi-ext-integration.git"
+    "url": "git+https://github.com/md-riaz/omniroute-agent-extension.git"
   },
-  "homepage": "https://github.com/md-riaz/omniroute-pi-ext-integration#readme",
+  "homepage": "https://github.com/md-riaz/omniroute-agent-extension#readme",
   "bugs": {
-    "url": "https://github.com/md-riaz/omniroute-pi-ext-integration/issues"
+    "url": "https://github.com/md-riaz/omniroute-agent-extension/issues"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.60.0"
+    "@earendil-works/pi-coding-agent": ">=0.60.0",
+    "@oh-my-pi/pi-coding-agent": ">=0.60.0"
+  },
+  "peerDependenciesMeta": {
+    "@oh-my-pi/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
   },
   "devDependencies": {
+    "@oh-my-pi/pi-coding-agent": "^15.8.3",
     "@types/node": "^25.9.1",
     "typescript": "^6.0.3"
   }

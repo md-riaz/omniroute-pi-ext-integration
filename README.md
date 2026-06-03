@@ -1,55 +1,85 @@
-# OmniRoute Pi Extension
+# omniroute-agent-extension
 
-[![npm version](https://img.shields.io/npm/v/omniroute-pi-ext-integration.svg?style=flat-square)](https://www.npmjs.com/package/omniroute-pi-ext-integration)
-[![npm downloads](https://img.shields.io/npm/dm/omniroute-pi-ext-integration.svg?style=flat-square)](https://www.npmjs.com/package/omniroute-pi-ext-integration)
+[![npm version](https://img.shields.io/npm/v/omniroute-agent-extension.svg?style=flat-square)](https://www.npmjs.com/package/omniroute-agent-extension)
+[![npm downloads](https://img.shields.io/npm/dm/omniroute-agent-extension.svg?style=flat-square)](https://www.npmjs.com/package/omniroute-agent-extension)
 
-A seamless [Pi Coding Agent](https://github.com/earendil-works/pi/tree/main/packages/coding-agent) extension that brings [OmniRoute](https://github.com/diegosouzapw/OmniRoute) — the ultimate AI gateway — directly into your editor environment.
+OmniRoute extension for [Pi Coding Agent](https://pi.dev) (`pi`) and [Oh My Pi](https://omp.sh) (`omp`).
 
-Connect to your local or remote OmniRoute server, browse models, manage combos, check quotas, and intelligently route your Pi queries across 44+ LLM providers.
+Connect to your local or remote OmniRoute server, browse models, and intelligently route queries across 44+ LLM providers — directly from your agent CLI.
 
 ## Features
 
-- 🔮 **Wizard-Based Setup**: Just run `/omni setup` inside Pi. No manual JSON editing needed.
-- ⚡ **Pure HTTP Client**: Works securely and seamlessly whether your OmniRoute server is running locally on `localhost:20128` or hosted on a remote VPS.
-- 🔄 **Combo & Model Sync**: Instantly push all OmniRoute combos and available models into Pi’s `Ctrl+P` model picker with full metadata (context windows, max tokens, reasoning support, and vision capabilities).
-- 🛠️ **Prompt Tool Fallback for Chat-Only Models**: Models that do not support native `tool_calls` can still use Pi tools through prompt-emulated tool calling.
-- 🔁 **Same `/model` Workflow**: Switch models normally; the extension chooses native tools or prompt tools automatically.
-- 📊 **Selected Model Status**: Status bar shows the currently selected Pi/OmniRoute model ID. For OmniRoute combos, this shows the combo/model selected in Pi, not the underlying provider model that OmniRoute ultimately routed to.
-- 🧬 **Smart Sorting**: Syncing organizes your model list by provider/group (`owned_by`) for a cleaner `Ctrl+P` experience.
-- 🛠️ **Diagnostics & Health**: Spot expired tokens, connection failures, or disconnected providers right when Pi starts (management endpoints must be accessible).
-- 📉 **Quota Management**: Live usage tracking mapped directly to OmniRoute's global quota endpoints.
+- **Wizard-Based Setup**: Run `/omni setup` inside `pi` or `omp`. No manual JSON editing needed.
+- **Dual CLI Support**: One package, identical feature set for both `pi` and `omp`.
+- **Pure HTTP Client**: Works whether your OmniRoute server is on `localhost:20128` or a remote VPS.
+- **Model Sync**: Push all available OmniRoute models into the `Ctrl+P` picker with full metadata — context windows, max tokens, reasoning support, and vision capabilities.
+- **Prompt Tool Fallback**: Chat-only and web-synced models that don't support native `tool_calls` transparently use prompt-emulated tool calling. Same `/model` workflow, no separate provider needed.
+- **Protocol Refresh**: Full tool schema on the first prompt-tool turn, compact reminders after, full resend every 6 turns or after tool-set changes and parse errors.
+- **Smart Sorting**: Models grouped by provider prefix (`owned_by`) for a cleaner `Ctrl+P` experience. Auto-routing models (`auto`, `auto/coding`, etc.) always appear first.
+- **Health Monitoring**: Periodic reachability checks with status bar indicators for unconfigured or unreachable servers.
+- **Env Overrides**: `OMNIROUTE_URL`, `OMNIROUTE_API_KEY`, `OMNIROUTE_PROVIDER_NAME` skip the setup wizard entirely.
 
 ## Installation
 
-Install the package directly from NPM:
+**Pi Coding Agent:**
 
 ```bash
-pi install omniroute-pi-ext-integration
+pi install omniroute-agent-extension
 ```
 
-Or install the latest development version directly from GitHub:
+```bash
+pi install git:github.com/md-riaz/omniroute-agent-extension
+```
+
+**Oh My Pi:**
 
 ```bash
-pi install git:github.com/md-riaz/omniroute-pi-ext-integration
+omp install omniroute-agent-extension
+```
+
+```bash
+omp install git:github.com/md-riaz/omniroute-agent-extension
 ```
 
 ## Getting Started
 
-1. **Start Pi:**
-   ```bash
-   pi
-   ```
-2. **Run Setup:** Once Pi starts, open the command palette and run:
-   ```bash
-   /omni setup
-   ```
-3. **Enter Credentials:** Enter your OmniRoute Server URL and API key when prompted. The key is collected before connectivity testing so protected `/v1/models` endpoints can be verified.
-4. **Sync Models:** Run `/omni sync` to populate the `Ctrl+P` list with all your provider models and combos.
-5. **Switch Models Normally:** Use `/model` as usual. No separate prompt-tools provider is needed.
+1. Start your CLI (`pi` or `omp`)
+2. Run `/omni setup` — enter your OmniRoute server URL and API key
+3. Run `/omni sync` — populates the `Ctrl+P` model picker
+4. Use `/model` as normal — the extension routes native vs prompt tools automatically
+
+Config is saved to:
+
+| CLI | Config path |
+|---|---|
+| `pi` | `~/.pi/agent/omniroute-agent-extension/config.json` |
+| `omp` | `~/.omp/agent/omniroute-agent-extension/config.json` |
+
+Synced models are written to `~/.pi/agent/models.json` or `~/.omp/agent/models.json` so they survive restarts without a network call.
+
+## Commands
+
+| Command | Description |
+|---|---|
+| `/omni` | Server health and provider status |
+| `/omni setup` | Configure server URL and API key interactively |
+| `/omni sync` | Fetch `/v1/models` and register the OmniRoute provider |
+| `/omni models [search]` | Browse synced models with optional keyword filter |
+| `/omni test <model>` | Smoke-test `/v1/chat/completions` with a specific model |
+| `/omni dashboard` | Show the OmniRoute dashboard URL |
+| `/omni config` | Show config and models.json paths with current settings |
+| `/omni help` | Show command list |
+
+## Agent Tools
+
+The extension registers two tools the LLM can call directly:
+
+- **`omniroute_status`** — returns server reachability, config path, and provider name
+- **`omniroute_sync`** — fetches `/v1/models` and re-registers the provider (equivalent to `/omni sync`)
 
 ## Prompt Tool Fallback
 
-Some OmniRoute-synced models are chat-only: they can answer text, but they do not return native OpenAI-style `message.tool_calls`. This is common for web-synced model IDs such as:
+Some OmniRoute-synced models are chat-only: they return text but not native `tool_calls`. This is common for web-synced models with `-web` in their identifier:
 
 ```text
 cgpt-web/gpt-5.4-pro
@@ -58,47 +88,43 @@ bb-web/gpt-4-turbo
 ds-web/deepseek-v4-pro
 ```
 
-For these models, the extension keeps the same Pi provider (`omni`) and `/model` workflow, but internally switches to prompt-emulated tool calling.
+For these models the extension keeps the same `omni` provider and `/model` workflow, but internally switches to prompt-emulated tool calling.
 
 ### Native tool mode
 
-Used for normal tool-capable models.
-
 ```text
-Pi agent
+Pi/omp agent
   -> omni provider
   -> OmniRoute with native tools: [...]
   -> model returns native tool_calls
-  -> Pi executes tools
+  -> agent executes tools
 ```
 
 ### Prompt tool mode
 
-Used when a model is chat-only or marked as not supporting native tool calls.
-
-Prompt tool mode is intentionally buffered: the extension waits for the full model response before showing text, because it must parse complete `<tool_call>` blocks before emitting Pi-native tool events.
+The extension injects a compact text protocol into the outbound system prompt. Tool calls are parsed from `<tool_call>` XML blocks in the response and converted to native tool events. Prompt tool mode is buffered — the extension waits for the full model response before emitting tool events.
 
 ```text
-Pi agent
+Pi/omp agent
   -> omni provider
-  -> extension renders Pi tools as text instructions
-  -> OmniRoute request is sent with tools: []
+  -> extension injects tool schemas as text in system prompt
+  -> OmniRoute request sent with tools: []
   -> model writes <tool_call>{...}</tool_call>
-  -> extension converts that text back into Pi native toolCall events
-  -> Pi executes tools normally
+  -> extension converts blocks to native toolCall events
+  -> agent executes tools normally
 ```
 
-The model is taught this wire format as a standalone assistant message:
+The model is taught this wire format:
 
 ```xml
 <tool_call>
-{"name":"read","arguments":{"path":"index.ts"}}
+{"name":"read","arguments":{"path":"shared.ts"}}
 </tool_call>
 ```
 
-Prompt tool mode only executes tool calls when the entire assistant message is one or more `<tool_call>` blocks plus whitespace. If the model includes prose, examples, or any extra text alongside `<tool_call>`, the extension treats the whole response as normal text and does not execute tools. This prevents accidental tool calls from documentation snippets or mixed explanatory answers.
+**Safety rule:** tool calls execute only when the entire assistant message is `<tool_call>` block(s) plus whitespace. Prose mixed with `<tool_call>` is treated as normal text — no tools execute. This prevents documentation snippets or mixed answers from accidentally triggering tool execution.
 
-To reduce context usage for web/chat-only models, the prompt-tool protocol is compact: tools are listed on one line each with minified parameter schemas instead of expanded JSON Schema blocks. The extension still exposes the full active Pi tool set in prompt-tool mode; it does not filter out extension/custom tools.
+**Protocol refresh:** full schema list on turn 1, compact argument-hint reminders on turns 2–5, full resend every 6 prompt-tool turns, after any tool-set change, or after malformed/mixed output.
 
 Tool results are fed back in history as text:
 
@@ -110,20 +136,14 @@ Tool results are fed back in history as text:
 
 ## How Prompt Tool Mode Is Detected
 
-Prompt tool mode is enabled when either condition is true:
+Prompt tool mode activates when either condition is true:
 
-1. The upstream model metadata contains `-web` during sync, such as OmniRoute model ID/name, `owned_by`, or model provider label. This does not change the Pi provider ID, which remains `omni`.
-2. The synced `models.json` model entry contains:
+1. The upstream model metadata contains `-web` during sync — checked against OmniRoute model ID, `name`, `owned_by`, or provider label.
+2. The synced `models.json` entry contains `"tool_calling": false`.
 
-```json
-{
-  "tool_calling": false
-}
-```
+The second check reads raw `models.json` because the CLI runtime strips custom fields like `tool_calling` from its `Model` objects.
 
-The second check reads raw `models.json` because Pi's runtime `Model` object does not preserve custom fields like `tool_calling`.
-
-Example synced model entry:
+Example synced entry for a chat-only model:
 
 ```json
 {
@@ -140,59 +160,52 @@ Example synced model entry:
 
 ## Model Switching
 
-Use Pi's normal model picker/command:
+Use the normal model picker:
 
 ```text
 /model cgpt-web/gpt-5.4-pro
 /model codex/gpt-5.2
-/model premium
+/model auto/coding
 ```
 
 The extension routes automatically:
 
 | Model kind | Detection | Tool mode |
 |---|---|---|
-| Web-synced model | Upstream model ID/name, OmniRoute `owned_by`, or model provider label contains `-web` | Prompt-emulated tools |
-| Explicit chat-only model | `tool_calling: false` in `models.json` | Prompt-emulated tools |
+| Web-synced model | ID / name / `owned_by` / provider contains `-web` | Prompt-emulated tools |
+| Explicit chat-only | `tool_calling: false` in `models.json` | Prompt-emulated tools |
 | Normal model | No fallback marker | Native tools |
 
-## Commands Reference
+## Auto Models
 
-| Command | Description |
-|---|---|
-| `/omni` | Dashboard showing server health, active connections, and combos |
-| `/omni sync` | Sync your Pi model picker with all healthy OmniRoute instances |
-| `/omni setup` | Launch interactive wizard to link Pi with your OmniRoute gateway |
-| `/omni dashboard` | Get the direct link to your OmniRoute web interface |
+The following virtual model IDs are always prepended to the synced list. OmniRoute resolves them server-side to the best available model for each intent:
+
+```
+auto         auto/coding    auto/fast
+auto/cheap   auto/offline   auto/smart   auto/lkgp
+```
 
 ## Development
 
-This repo is intentionally small and AI-friendly:
+```bash
+npm run typecheck   # tsc — zero errors expected
+npm run smoke       # import check for omp.ts and pi.ts via node --experimental-strip-types
+```
 
 | File | Purpose |
 |---|---|
-| `AGENTS.md` | Required instructions for AI agents editing this repo. |
-| `AI.md` | Fast handoff guide for AI agents and future maintainers. |
-| `ARCHITECTURE.md` | Data flows and prompt-tool architecture. |
-| `CONTRIBUTING.md` | Local setup, test checklist, and contribution rules. |
-| `index.ts` | Extension implementation. |
-
-Run TypeScript check:
-
-```bash
-npm run typecheck
-```
-
-Smoke-test extension import:
-
-```bash
-npm run smoke
-```
+| `shared.ts` | All business logic — no CLI package imports; local `OmniPI` interface |
+| `omp.ts` | Oh My Pi entry point — `OMP_HOME` / `~/.omp/agent` |
+| `pi.ts` | Pi Coding Agent entry point — `PI_HOME` / `~/.pi/agent` |
+| `AGENTS.md` | Instructions for AI agents editing this repo |
+| `AI.md` | Fast handoff guide for AI agents and maintainers |
+| `ARCHITECTURE.md` | Data flows and prompt-tool protocol details |
+| `CONTRIBUTING.md` | Local setup, test checklist, contribution rules |
 
 ## Requirements
 
-- [Pi Coding Agent](https://github.com/earendil-works/pi/tree/main/packages/coding-agent) v0.60.0+
-- [OmniRoute](https://github.com/diegosouzapw/OmniRoute) v2.9.0+
+- `pi` ([`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)) v0.60.0+ **or** `omp` ([`@oh-my-pi/pi-coding-agent`](https://www.npmjs.com/package/@oh-my-pi/pi-coding-agent)) v0.60.0+
+- [OmniRoute](https://github.com/diegosouzapw/OmniRoute) — any version exposing `/v1/models` and `/v1/chat/completions`
 
 ## License
 
