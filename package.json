@@ -38,11 +38,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/md-riaz/omniroute-pi-ext-integration.git"
+    "url": "git+https://github.com/md-riaz/omniroute-agent-extension.git"
   },
-  "homepage": "https://github.com/md-riaz/omniroute-pi-ext-integration#readme",
+  "homepage": "https://github.com/md-riaz/omniroute-agent-extension#readme",
   "bugs": {
-    "url": "https://github.com/md-riaz/omniroute-pi-ext-integration/issues"
+    "url": "https://github.com/md-riaz/omniroute-agent-extension/issues"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.60.0",
