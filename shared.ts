@@ -3,84 +3,6 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import * as Typebox from "typebox/type";
 
-// ─── Local types (no host package imports needed) ─────────────────────────────
-type TextContent = { type: "text"; text: string };
-type ToolCall = { type: "toolCall"; id: string; name: string; arguments: Record<string, any> };
-type Tool = { name: string; description?: string; parameters?: any };
-type Model<_T = any> = { id: string; name?: string; provider: string; api?: string };
-type Context = { systemPrompt?: string; messages: any[]; tools?: Tool[] };
-type SimpleStreamOptions = { sessionId?: string; signal?: AbortSignal; [k: string]: any };
-type Message = any;
-
-type AssistantMessage = {
-	role: "assistant";
-	content: any[];
-	api?: string;
-	provider?: string;
-	model?: string;
-	usage: {
-		input: number;
-		output: number;
-		cacheRead: number;
-		cacheWrite: number;
-		totalTokens: number;
-		cost: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
-	};
-	stopReason: string;
-	errorMessage?: string;
-	responseId?: string;
-	responseModel?: string;
-	timestamp: number;
-};
-
-/**
- * Minimal async event stream compatible with the AssistantMessageEventStream
- * contract expected by both @earendil-works and @oh-my-pi extension hosts.
- */
-class OmniEventStream {
-	private _queue: any[] = [];
-	private _waiters: Array<(v: IteratorResult<any>) => void> = [];
-	private _done = false;
-	private _resolve!: (msg: AssistantMessage) => void;
-	private _reject!: (err: unknown) => void;
-	readonly result: Promise<AssistantMessage>;
-
-	constructor() {
-		this.result = new Promise<AssistantMessage>((resolve, reject) => {
-			this._resolve = resolve;
-			this._reject = reject;
-		});
-	}
-
-	push(event: any): void {
-		if (event.type === "done") this._resolve(event.message as AssistantMessage);
-		else if (event.type === "error") this._reject(new Error(event.reason ?? "stream error"));
-		if (this._waiters.length > 0) {
-			this._waiters.shift()!({ value: event, done: false });
-		} else {
-			this._queue.push(event);
-		}
-	}
-
-	end(): void {
-		this._done = true;
-		for (const w of this._waiters) w({ value: undefined as any, done: true });
-		this._waiters = [];
-	}
-
-	[Symbol.asyncIterator](): AsyncIterator<any> {
-		return {
-			next: (): Promise<IteratorResult<any>> => {
-				if (this._queue.length > 0) return Promise.resolve({ value: this._queue.shift()!, done: false });
-				if (this._done) return Promise.resolve({ value: undefined as any, done: true });
-				return new Promise(resolve => this._waiters.push(resolve));
-			},
-		};
-	}
-}
-
-type AssistantMessageEventStream = OmniEventStream;
-
 // ─── Local CLI interface — no import from either CLI package ──────────────────
 interface OmniPI {
 	registerProvider(name: string, config: any): void;
@@ -131,7 +53,6 @@ interface OmniApiModel {
 	output?: unknown;
 	type?: string;
 	provider?: string;
-	tool_calling?: boolean;
 }
 
 type SyncedModel = {
@@ -142,8 +63,6 @@ type SyncedModel = {
 	maxTokens?: number;
 	reasoning?: boolean;
 	input?: string[];
-	api?: string;
-	tool_calling?: boolean;
 };
 
 type ProviderModelConfig = {
@@ -158,11 +77,7 @@ type ProviderModelConfig = {
 };
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-// All models are registered as openai-completions so OMP's model picker
-// recognises them. Our streamSimple intercepts every request and routes
-// chat-only/web models through the prompt-tool text protocol internally.
 const PROVIDER_API = "openai-completions";
-const OMNI_PROMPT_TOOLS_API = "omni-prompt-tools"; // internal routing marker only
 const AUTO_MODELS = ["auto", "auto/coding", "auto/fast", "auto/cheap", "auto/offline", "auto/smart", "auto/lkgp"];
 const EXTENSION_STATE_DIR = "omniroute-agent-extension";
 const DEFAULT_CONFIG: OmniConfig = {
@@ -273,12 +188,6 @@ function isPiChatModel(model: OmniApiModel): boolean {
 	return output.length === 0 || output.includes("text");
 }
 
-function isWebSyncedModel(...markers: unknown[]): boolean {
-	return markers
-		.filter((m): m is string => typeof m === "string")
-		.some((m) => m.toLowerCase().includes("-web"));
-}
-
 function upsertSyncedModel(models: SyncedModel[], next: SyncedModel): void {
 	const index = models.findIndex((m) => m.id === next.id);
 	if (index < 0) {
@@ -313,14 +222,7 @@ async function fetchSyncedModels(config: OmniConfig): Promise<SyncedModel[]> {
 		const id = typeof m === "string" ? m : m?.id;
 		if (!id || !isPiChatModel(m)) continue;
 
-		const synced: SyncedModel = {
-			id,
-			name: m.name ?? id,
-			owned_by: m.owned_by,
-			api: OMNI_PROMPT_TOOLS_API,
-		};
-
-		if (isWebSyncedModel(id, m.name, m.owned_by, m.provider)) synced.tool_calling = false;
+		const synced: SyncedModel = { id, name: m.name ?? id, owned_by: m.owned_by };
 
 		const input = normalizeModalities(m.input_modalities ?? m.input);
 		synced.input = input.length > 0 ? input : ["text"];
@@ -381,7 +283,6 @@ async function discoverModels(config: OmniConfig): Promise<ProviderModelConfig[]
 
 function buildProviderEntry(config: OmniConfig, models: ProviderModelConfig[]): any {
 	return {
-		name: "OmniRoute",
 		baseUrl: `${config.serverUrl}/v1`,
 		apiKey: config.apiKey || "omniroute-public",
 		api: PROVIDER_API,
@@ -402,18 +303,18 @@ function persistModelsJson(agentHome: string, config: OmniConfig, models: Provid
 	writeFileSync(path, JSON.stringify(file, null, 2));
 }
 
-async function registerOmniProvider(pi: OmniPI, agentHome: string, config: OmniConfig, streamFn: Function): Promise<ProviderModelConfig[]> {
+async function registerOmniProvider(pi: OmniPI, agentHome: string, config: OmniConfig): Promise<ProviderModelConfig[]> {
 	const models = await discoverModels(config);
-	pi.registerProvider(config.providerName, { ...buildProviderEntry(config, models), streamSimple: streamFn });
+	pi.registerProvider(config.providerName, buildProviderEntry(config, models));
 	persistModelsJson(agentHome, config, models);
 	return models;
 }
 
-function reloadProviderFromModelsJson(pi: OmniPI, agentHome: string, config: OmniConfig, streamFn: Function): void {
+function reloadProviderFromModelsJson(pi: OmniPI, agentHome: string, config: OmniConfig): void {
 	try {
 		const provider = readModelsJson(agentHome)?.providers?.[config.providerName];
 		if (!provider) return;
-		pi.registerProvider(config.providerName, { ...provider, streamSimple: streamFn });
+		pi.registerProvider(config.providerName, provider);
 	} catch {}
 }
 
@@ -484,7 +385,7 @@ function helpText(): string {
 }
 
 // ─── Actions ──────────────────────────────────────────────────────────────────
-async function runSetup(ctx: any, pi: OmniPI, agentHome: string, streamFn: Function): Promise<OmniConfig | undefined> {
+async function runSetup(ctx: any, pi: OmniPI, agentHome: string): Promise<OmniConfig | undefined> {
 	const current = loadConfig(agentHome);
 	const serverUrl = await ctx.ui.input("OmniRoute server URL", current.serverUrl);
 	if (serverUrl === undefined) return undefined;
@@ -502,7 +403,7 @@ async function runSetup(ctx: any, pi: OmniPI, agentHome: string, streamFn: Funct
 	}
 
 	saveConfig(agentHome, next);
-	const models = await registerOmniProvider(pi, agentHome, next, streamFn);
+	const models = await registerOmniProvider(pi, agentHome, next);
 	;(ctx as any).modelRegistry?.refresh?.();
 	ctx.ui.notify(`Saved. Synced ${models.length} model(s).`, "info");
 	return next;
@@ -527,605 +428,22 @@ async function testChat(config: OmniConfig, model: string): Promise<string> {
 	return typeof content === "string" ? content.trim() : JSON.stringify(data).slice(0, 200);
 }
 
-// ─── Chat HTTP helper ─────────────────────────────────────────────────────────
-/**
- * Non-streaming POST /v1/chat/completions. Used by streamWithPromptTools and
- * streamNativeTools in place of delegating to the host's openai-completions
- * provider — which requires importing host-internal packages that are not
- * safely importable from an extension's own module context.
- */
-async function requestChatJson(
-	config: OmniConfig,
-	body: Record<string, unknown>,
-	signal?: AbortSignal,
-): Promise<any> {
-	const res = await fetch(`${config.serverUrl}/v1/chat/completions`, {
-		method: "POST",
-		headers: { "Content-Type": "application/json", ...authHeaders(config) },
-		body: JSON.stringify(body),
-		signal: signal ?? AbortSignal.timeout(120_000),
-	});
-	const text = await res.text();
-	if (!res.ok) throw Object.assign(new Error(`${res.status}: ${text || res.statusText}`), { status: res.status });
-	return text ? JSON.parse(text) : {};
-}
-
-function buildOpenAIMessages(ctx: Context): any[] {
-	const out: any[] = [];
-	if (ctx.systemPrompt) out.push({ role: "system", content: ctx.systemPrompt });
-	for (const m of ctx.messages) {
-		out.push({ role: m.role, content: textOf(m.content) || "" });
-	}
-	return out;
-}
-
-function parseUsage(raw: any): AssistantMessage["usage"] {
-	return {
-		input: raw?.prompt_tokens ?? 0,
-		output: raw?.completion_tokens ?? 0,
-		cacheRead: 0,
-		cacheWrite: 0,
-		totalTokens: raw?.total_tokens ?? 0,
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-	};
-}
-
-// ─── Prompt-tool system ───────────────────────────────────────────────────────
-const PROMPT_TOOL_FULL_REFRESH_TURNS = 6;
-const PROMPT_TOOL_MAX_STATE_ENTRIES = 1000;
-
-type PromptToolProtocolState = {
-	toolSignature: string;
-	protocolId: string;
-	promptToolTurns: number;
-	lastFullProtocolTurn: number;
-	forceFullNextTurn: boolean;
-};
-
-const promptToolProtocolStates = new Map<string, PromptToolProtocolState>();
-let fullProtocolCache: { key: string; text: string } | undefined;
-
-function toolsSignature(tools: Tool[]): string {
-	return JSON.stringify(tools.map((t) => [t.name, t.description, t.parameters]));
-}
-
-function stableHash(input: string): string {
-	let hash = 2166136261;
-	for (let i = 0; i < input.length; i++) {
-		hash ^= input.charCodeAt(i);
-		hash = Math.imul(hash, 16777619);
-	}
-	return (hash >>> 0).toString(16).padStart(8, "0");
-}
-
-function protocolIdForSignature(signature: string): string {
-	return `pi-tools-v1:${stableHash(signature)}`;
-}
-
-function promptToolStateKey(model: Model<any>, options?: SimpleStreamOptions): string {
-	return [options?.sessionId || "no-session", model.provider, model.id].join(":");
-}
-
-function compactToolDescription(description: unknown): string {
-	if (typeof description !== "string") return "";
-	return description.replace(/\s+/g, " ").trim().slice(0, 180);
-}
-
-function compactToolParameters(parameters: unknown): string {
-	try {
-		return JSON.stringify(parameters ?? {});
-	} catch {
-		return "{}";
-	}
-}
-
-function renderFullToolProtocol(tools: Tool[], protocolId: string): string {
-	const signature = toolsSignature(tools);
-	const key = `full:${protocolId}:${signature}`;
-	if (fullProtocolCache?.key === key) return fullProtocolCache.text;
-
-	const lines: string[] = [
-		"# Pi prompt tools",
-		`Protocol id: ${protocolId}`,
-		"Native/internal tool calls are unavailable for this chat-only model.",
-		"To call tools, the entire assistant message must be only <tool_call> block(s), no prose/markdown/extra text.",
-		"If any extra text appears beside <tool_call>, it is normal text and no tool executes.",
-		'Format: <tool_call>{"name":"tool_name","arguments":{}}</tool_call>',
-		"Use valid JSON. arguments must be an object. After tool calls, stop and wait for <tool_result>.",
-		"Never invent tool output. If no tool is needed, answer normally without <tool_call>.",
-		"Available tools:",
-	];
-
-	for (const tool of tools) {
-		const desc = compactToolDescription(tool.description);
-		lines.push(`- ${tool.name}${desc ? `: ${desc}` : ""}; parameters=${compactToolParameters(tool.parameters)}`);
-	}
-
-	const text = lines.join("\n");
-	fullProtocolCache = { key, text };
-	return text;
-}
-
-function compactToolReminderHint(tool: Tool): string {
-	const params = compactToolParameters(tool.parameters);
-	return `${tool.name} parameters=${params.length > 300 ? `${params.slice(0, 300)}...` : params}`;
-}
-
-function renderToolProtocolReminder(tools: Tool[], protocolId: string): string {
-	return [
-		"# Pi prompt tools reminder",
-		`Use protocol ${protocolId}.`,
-		'Tool call format: <tool_call>{"name":"tool_name","arguments":{}}</tool_call>',
-		"Tool calls must be standalone assistant messages: no prose/markdown/extra text.",
-		"Extra text beside <tool_call> means no tool executes.",
-		"Compact argument hints:",
-		...tools.map(compactToolReminderHint),
-	].join("\n");
-}
-
-function selectPromptToolProtocol(
-	model: Model<any>,
-	tools: Tool[],
-	options?: SimpleStreamOptions,
-): { text: string } {
-	const key = promptToolStateKey(model, options);
-	const signature = toolsSignature(tools);
-	const protocolId = protocolIdForSignature(signature);
-	const current = promptToolProtocolStates.get(key);
-	const nextTurn = current ? current.promptToolTurns + 1 : 1;
-	const toolSetChanged = !current || current.toolSignature !== signature;
-	const refreshDue = current ? nextTurn - current.lastFullProtocolTurn >= PROMPT_TOOL_FULL_REFRESH_TURNS : true;
-	const sendFull = toolSetChanged || refreshDue || current?.forceFullNextTurn === true;
-
-	if (promptToolProtocolStates.size >= PROMPT_TOOL_MAX_STATE_ENTRIES && !promptToolProtocolStates.has(key)) {
-		const oldestKey = promptToolProtocolStates.keys().next().value;
-		if (oldestKey !== undefined) promptToolProtocolStates.delete(oldestKey);
-	}
-
-	promptToolProtocolStates.set(key, {
-		toolSignature: signature,
-		protocolId,
-		promptToolTurns: nextTurn,
-		lastFullProtocolTurn: sendFull ? nextTurn : current?.lastFullProtocolTurn ?? nextTurn,
-		forceFullNextTurn: false,
-	});
-
-	return {
-		text: sendFull
-			? renderFullToolProtocol(tools, protocolId)
-			: renderToolProtocolReminder(tools, protocolId),
-	};
-}
-
-function forceFullProtocolNextTurn(model: Model<any>, options?: SimpleStreamOptions): void {
-	const state = promptToolProtocolStates.get(promptToolStateKey(model, options));
-	if (state) state.forceFullNextTurn = true;
-}
-
-function textOf(content: string | (TextContent | { type: string })[] | undefined | null): string {
-	if (!content) return "";
-	if (typeof content === "string") return content;
-	if (!Array.isArray(content)) return "";
-	return content
-		.filter((c): c is TextContent => !!c && "type" in c && c.type === "text")
-		.map((c) => c.text ?? "")
-		.join("");
-}
-
-function renderToolCallBlock(tc: ToolCall): string {
-	return `<tool_call>\n${JSON.stringify({ name: tc.name, arguments: tc.arguments })}\n</tool_call>`;
-}
-
-type FlattenableMessage = Message | { role: "system"; content: string | TextContent[]; timestamp?: number };
-
-function flattenMessages(messages: FlattenableMessage[]): Message[] {
-	const out: Message[] = [];
-	const pushText = (role: "user" | "assistant", text: string) => {
-		if (!text.trim()) return;
-		const last = out[out.length - 1];
-		if (last?.role === role) {
-			(last.content as TextContent[])[0].text += `\n\n${text}`;
-			return;
-		}
-		out.push({ role, content: [{ type: "text", text }], timestamp: Date.now() } as Message);
-	};
-
-	for (const msg of messages) {
-		if (msg.role === "user") {
-			pushText("user", textOf(msg.content));
-		} else if (msg.role === "assistant") {
-			const prose = textOf(msg.content);
-			const calls = Array.isArray(msg.content)
-				? msg.content.filter((c: any): c is ToolCall => c.type === "toolCall")
-				: [];
-			pushText("assistant", [prose, ...calls.map(renderToolCallBlock)].filter((s) => s.trim()).join("\n\n"));
-		} else if ((msg as any).role === "toolResult") {
-			const m = msg as any;
-			const tag = m.isError ? "tool_result error" : "tool_result";
-			pushText("user", `<${tag} tool="${m.toolName}" id="${m.toolCallId}">\n${textOf(m.content)}\n</tool_result>`);
-		} else if (msg.role === "system") {
-			pushText("user", `<system>\n${textOf(msg.content)}\n</system>`);
-		}
-	}
-	return out;
-}
-
-const TOOL_CALL_RE = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g;
-
-function stripCodeFence(raw: string): string {
-	return raw
-		.replace(/^\s*```[a-zA-Z]*\s*\n?/, "")
-		.replace(/\n?\s*```\s*$/, "")
-		.trim();
-}
-
-function coerceArguments(value: unknown): Record<string, any> {
-	if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, any>;
-	if (typeof value === "string") {
-		try {
-			const parsed = JSON.parse(value);
-			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, any>;
-		} catch {}
-	}
-	return {};
-}
-
-type ParseToolCallsResult = {
-	prose: string;
-	calls: { name: string; arguments: Record<string, any> }[];
-	errors: string[];
-	mixedToolCallText: boolean;
-};
-
-function parseToolCalls(text: string): ParseToolCallsResult {
-	const calls: { name: string; arguments: Record<string, any> }[] = [];
-	const errors: string[] = [];
-	const cleaned = stripCodeFence(text);
-	const original = cleaned.trim();
-	if (!original) return { prose: "", calls, errors, mixedToolCallText: false };
-
-	const openIdx = cleaned.indexOf("<tool_call>");
-	const hasToolCallText = openIdx !== -1 && cleaned.indexOf("</tool_call>", openIdx) !== -1;
-	TOOL_CALL_RE.lastIndex = 0;
-	const remainder = cleaned.replace(TOOL_CALL_RE, "").trim();
-	if (remainder) return { prose: text.trim(), calls: [], errors: [], mixedToolCallText: hasToolCallText };
-
-	let match: RegExpExecArray | null;
-	TOOL_CALL_RE.lastIndex = 0;
-	while ((match = TOOL_CALL_RE.exec(cleaned)) !== null) {
-		const body = stripCodeFence(match[1]);
-		try {
-			const parsed = JSON.parse(body);
-			if (parsed && typeof parsed.name === "string") {
-				calls.push({ name: parsed.name, arguments: coerceArguments(parsed.arguments) });
-			} else {
-				errors.push(`tool_call missing a string "name": ${body.slice(0, 200)}`);
-			}
-		} catch (e) {
-			errors.push(`invalid JSON in <tool_call> (${e instanceof Error ? e.message : "parse error"}): ${body.slice(0, 200)}`);
-		}
-	}
-
-	if (calls.length === 0 && errors.length === 0) return { prose: original, calls, errors, mixedToolCallText: false };
-	return { prose: "", calls, errors, mixedToolCallText: false };
-}
-
-function streamWithPromptTools(config: OmniConfig, model: Model<any>, context: Context, options?: SimpleStreamOptions): OmniEventStream {
-	const stream = new OmniEventStream();
-
-	(async () => {
-		const output: AssistantMessage = {
-			role: "assistant",
-			content: [],
-			api: model.api,
-			provider: model.provider,
-			model: model.id,
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "stop",
-			timestamp: Date.now(),
-		};
-
-		try {
-			stream.push({ type: "start", partial: output });
-
-			const tools = context.tools ?? [];
-			const protocol = tools.length > 0 ? selectPromptToolProtocol(model, tools, options) : undefined;
-			const innerContext: Context = {
-				// Protocol is ephemeral: appended only to this outbound request, never into flattened history.
-				systemPrompt: protocol
-					? `${context.systemPrompt ?? ""}\n\n${protocol.text}`.trim()
-					: context.systemPrompt,
-				messages: flattenMessages(context.messages),
-				tools: [],
-			};
-
-			// Direct non-streaming HTTP call — avoids importing host-internal packages
-			// (getApiProvider / createAssistantMessageEventStream) that are not safely
-			// resolvable from an extension's own node_modules context.
-			const data = await requestChatJson(
-				config,
-				{ model: model.id, messages: buildOpenAIMessages(innerContext), stream: false },
-				options?.signal,
-			);
-
-			output.usage = parseUsage(data?.usage);
-			output.responseModel = data?.model;
-
-			const choice = data?.choices?.[0];
-			const finishReason = choice?.finish_reason ?? "stop";
-			if (finishReason === "error" || finishReason === "aborted") {
-				output.stopReason = finishReason;
-				output.errorMessage = choice?.message?.content ?? finishReason;
-				stream.push({ type: "error", reason: output.stopReason, error: output });
-				stream.end();
-				return;
-			}
-
-			const rawText: string = choice?.message?.content ?? "";
-			const parsed = tools.length > 0
-				? parseToolCalls(rawText)
-				: { prose: rawText, calls: [], errors: [] as string[], mixedToolCallText: false };
-			let prose = parsed.prose;
-
-			if (parsed.errors.length > 0 || parsed.mixedToolCallText) {
-				forceFullProtocolNextTurn(model, options);
-			}
-
-			if (parsed.errors.length > 0) {
-				const note = [
-					"[omni-prompt-tools] Could not parse tool call(s). Re-emit each as:",
-					'<tool_call>{"name":"tool_name","arguments":{}}</tool_call>',
-					...parsed.errors.map((e) => `- ${e}`),
-				].join("\n");
-				prose = prose ? `${prose}\n\n${note}` : note;
-			}
-
-			if (prose) {
-				output.content.push({ type: "text", text: prose });
-				const idx = output.content.length - 1;
-				stream.push({ type: "text_start", contentIndex: idx, partial: output });
-				stream.push({ type: "text_delta", contentIndex: idx, delta: prose, partial: output });
-				stream.push({ type: "text_end", contentIndex: idx, content: prose, partial: output });
-			}
-
-			parsed.calls.forEach((call, i) => {
-				const id = `call_${Date.now().toString(36)}_${i}_${Math.random().toString(36).slice(2, 8)}`;
-				const toolCall: ToolCall = { type: "toolCall", id, name: call.name, arguments: call.arguments };
-				output.content.push(toolCall);
-				const idx = output.content.length - 1;
-				stream.push({ type: "toolcall_start", contentIndex: idx, partial: output });
-				stream.push({ type: "toolcall_delta", contentIndex: idx, delta: JSON.stringify(call.arguments), partial: output });
-				stream.push({ type: "toolcall_end", contentIndex: idx, toolCall, partial: output });
-			});
-
-			output.stopReason = parsed.calls.length > 0 ? "toolUse" : "stop";
-			// OmniRoute models have cost: 0 — no calculateCost() import needed.
-			stream.push({ type: "done", reason: output.stopReason as "stop" | "length" | "toolUse", message: output });
-			stream.end();
-		} catch (error) {
-			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = error instanceof Error ? error.message : String(error);
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
-		}
-	})();
-
-	return stream;
-}
-
-/**
- * Handles native-tool models via SSE streaming (stream:true).
- * Parses OpenAI-compatible SSE chunks and emits host stream events in real-time
- * so the user sees token-by-token output just like any built-in provider.
- */
-function streamNativeTools(config: OmniConfig, model: Model<any>, context: Context, options?: SimpleStreamOptions): OmniEventStream {
-	const stream = new OmniEventStream();
-
-	(async () => {
-		const output: AssistantMessage = {
-			role: "assistant",
-			content: [],
-			api: model.api,
-			provider: model.provider,
-			model: model.id,
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "stop",
-			timestamp: Date.now(),
-		};
-
-		try {
-			stream.push({ type: "start", partial: output });
-
-			const flatMsgs = flattenMessages(context.messages);
-			const innerContext: Context = { ...context, messages: flatMsgs };
-			const body: Record<string, unknown> = {
-				model: model.id,
-				messages: buildOpenAIMessages(innerContext),
-				stream: true,
-				stream_options: { include_usage: true },
-			};
-			if ((context.tools ?? []).length > 0) {
-				body.tools = (context.tools ?? []).map((t) => ({
-					type: "function",
-					function: {
-						name: t.name,
-						description: t.description ?? "",
-						parameters: t.parameters ?? { type: "object", properties: {} },
-					},
-				}));
-			}
-
-			const res = await fetch(`${config.serverUrl}/v1/chat/completions`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json", ...authHeaders(config) },
-				body: JSON.stringify(body),
-				signal: options?.signal ?? AbortSignal.timeout(120_000),
-			});
-
-			if (!res.ok) {
-				const text = await res.text();
-				throw Object.assign(new Error(`${res.status}: ${text || res.statusText}`), { status: res.status });
-			}
-
-			const reader = res.body!.getReader();
-			const decoder = new TextDecoder();
-			let buf = "";
-			let textStarted = false;
-			let textIdx = -1;
-			let accText = "";
-			// Per-index tool call accumulator: index → { id, name, argStr, contentIdx }
-			const toolAcc = new Map<number, { id: string; name: string; argStr: string; contentIdx: number }>();
-			let finishReason = "stop";
-
-			outer: while (true) {
-				const { done, value } = await reader.read();
-				if (done) break;
-				buf += decoder.decode(value, { stream: true });
-
-				const lines = buf.split("\n");
-				buf = lines.pop()!;
-
-				for (const line of lines) {
-					const raw = line.trim();
-					if (!raw.startsWith("data:")) continue;
-					const payload = raw.slice(5).trim();
-					if (payload === "[DONE]") break outer;
-
-					let chunk: any;
-					try { chunk = JSON.parse(payload); } catch { continue; }
-
-					if (chunk.usage) output.usage = parseUsage(chunk.usage);
-					output.responseModel ??= chunk.model;
-
-					const choice = chunk.choices?.[0];
-					if (!choice) continue;
-					const delta = choice.delta ?? {};
-
-					// Text content
-					if (typeof delta.content === "string" && delta.content) {
-						if (!textStarted) {
-							textIdx = output.content.length;
-							output.content.push({ type: "text", text: "" } as TextContent);
-							stream.push({ type: "text_start", contentIndex: textIdx, partial: output });
-							textStarted = true;
-						}
-						accText += delta.content;
-						(output.content[textIdx] as TextContent).text = accText;
-						stream.push({ type: "text_delta", contentIndex: textIdx, delta: delta.content, partial: output });
-					}
-
-					// Tool call deltas
-					for (const tc of delta.tool_calls ?? []) {
-						const i: number = tc.index ?? 0;
-						if (!toolAcc.has(i)) {
-							const contentIdx = output.content.length;
-							output.content.push({ type: "toolCall", id: tc.id ?? "", name: tc.function?.name ?? "", arguments: {} } as ToolCall);
-							toolAcc.set(i, { id: tc.id ?? "", name: tc.function?.name ?? "", argStr: "", contentIdx });
-							stream.push({ type: "toolcall_start", contentIndex: contentIdx, partial: output });
-						}
-						const acc = toolAcc.get(i)!;
-						if (tc.id && !acc.id) acc.id = tc.id;
-						if (tc.function?.name && !acc.name) acc.name = tc.function.name;
-						const argChunk: string = tc.function?.arguments ?? "";
-						if (argChunk) {
-							acc.argStr += argChunk;
-							stream.push({ type: "toolcall_delta", contentIndex: acc.contentIdx, delta: argChunk, partial: output });
-						}
-					}
-
-					if (choice.finish_reason) finishReason = choice.finish_reason;
-				}
-			}
-
-			// Finalise text
-			if (textStarted) {
-				stream.push({ type: "text_end", contentIndex: textIdx, content: accText, partial: output });
-			}
-
-			// Finalise tool calls
-			for (const [, acc] of toolAcc) {
-				let args: Record<string, any> = {};
-				try { args = JSON.parse(acc.argStr); } catch {}
-				const toolCall: ToolCall = { type: "toolCall", id: acc.id, name: acc.name, arguments: args };
-				output.content[acc.contentIdx] = toolCall;
-				stream.push({ type: "toolcall_end", contentIndex: acc.contentIdx, toolCall, partial: output });
-			}
-
-			output.stopReason = finishReason === "tool_calls" || toolAcc.size > 0 ? "toolUse"
-				: finishReason === "length" ? "length"
-				: "stop";
-			stream.push({ type: "done", reason: output.stopReason as "stop" | "length" | "toolUse", message: output });
-			stream.end();
-		} catch (error) {
-			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = error instanceof Error ? error.message : String(error);
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
-		}
-	})();
-
-	return stream;
-}
-
 // ─── Factory ──────────────────────────────────────────────────────────────────
 export async function createOmniExtension(pi: OmniPI, opts: AgentHomeOptions): Promise<void> {
 	const agentHome = resolveAgentHome(opts);
 	let config = loadConfig(agentHome);
 	let healthTimer: ReturnType<typeof setInterval> | undefined;
 
-	function modelConfigToolCallingFalse(model: { id: string; provider: string }): boolean {
-		try {
-			const provider = readModelsJson(agentHome)?.providers?.[model.provider];
-			const configured = (provider?.models ?? []).find((m: any) => m?.id === model.id);
-			return (
-				configured?.tool_calling === false ||
-				isWebSyncedModel(configured?.id, configured?.name, configured?.owned_by, configured?.provider)
-			);
-		} catch {
-			return false;
-		}
-	}
-
-	function shouldUsePromptTools(model: { id: string; name?: string; provider: string }): boolean {
-		return (
-			modelConfigToolCallingFalse(model) ||
-			isWebSyncedModel(model.id, model.name, model.provider) ||
-			`${model.provider ?? ""}`.toLowerCase().includes("-web")
-		);
-	}
-
-	function streamOmni(model: Model<any>, context: Context, options?: SimpleStreamOptions): OmniEventStream {
-		// Called for every OmniRoute model. Routes internally: chat-only/web
-		// models get the prompt-tool text protocol; native tool models get a
-		// direct non-streaming HTTP call with OpenAI tool_calls support.
-		if (shouldUsePromptTools(model)) return streamWithPromptTools(config, model, context, options);
-		return streamNativeTools(config, model, context, options);
-	}
-
 	async function sync(ctx?: any): Promise<number> {
 		config = loadConfig(agentHome);
-		const models = await registerOmniProvider(pi, agentHome, config, streamOmni);
+		const models = await registerOmniProvider(pi, agentHome, config);
 		;(ctx as any)?.modelRegistry?.refresh?.();
 		ctx?.ui.notify(`OmniRoute synced ${models.length} model(s).`, "info");
 		return models.length;
 	}
 
 	// On load: re-register from existing models.json (no network call)
-	reloadProviderFromModelsJson(pi, agentHome, config, streamOmni);
+	reloadProviderFromModelsJson(pi, agentHome, config);
 
 	pi.on("session_start", async (_event: any, ctx: any) => {
 		config = loadConfig(agentHome);
@@ -1181,7 +499,7 @@ export async function createOmniExtension(pi: OmniPI, opts: AgentHomeOptions): P
 		parameters: Typebox.Object({}),
 		async execute(_id: string, _params: any) {
 			const cfg = loadConfig(agentHome);
-			const models = await registerOmniProvider(pi, agentHome, cfg, streamOmni);
+			const models = await registerOmniProvider(pi, agentHome, cfg);
 			return {
 				content: [{ type: "text" as const, text: `OmniRoute synced ${models.length} model(s).` }],
 				details: { count: models.length, provider: cfg.providerName },
@@ -1206,7 +524,7 @@ export async function createOmniExtension(pi: OmniPI, opts: AgentHomeOptions): P
 				if (sub === "help") return ctx.ui.notify(helpText(), "info");
 
 				if (sub === "setup") {
-					const next = await runSetup(ctx, pi, agentHome, streamOmni);
+					const next = await runSetup(ctx, pi, agentHome);
 					if (next) config = next;
 					return;
 				}
