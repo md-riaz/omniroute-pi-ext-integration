@@ -158,8 +158,11 @@ type ProviderModelConfig = {
 };
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const OMNI_PROMPT_TOOLS_API = "omni-prompt-tools";
-const UNDERLYING_API = "openai-completions";
+// All models are registered as openai-completions so OMP's model picker
+// recognises them. Our streamSimple intercepts every request and routes
+// chat-only/web models through the prompt-tool text protocol internally.
+const PROVIDER_API = "openai-completions";
+const OMNI_PROMPT_TOOLS_API = "omni-prompt-tools"; // internal routing marker only
 const AUTO_MODELS = ["auto", "auto/coding", "auto/fast", "auto/cheap", "auto/offline", "auto/smart", "auto/lkgp"];
 const EXTENSION_STATE_DIR = "omniroute-agent-extension";
 const DEFAULT_CONFIG: OmniConfig = {
@@ -344,14 +347,10 @@ async function fetchSyncedModels(config: OmniConfig): Promise<SyncedModel[]> {
 }
 
 function buildProviderModelConfig(m: SyncedModel): ProviderModelConfig {
-	// Chat-only / web models go through our prompt-tool streamSimple.
-	// Native tool models use the host's built-in openai-completions handler
-	// (real SSE streaming) via the provider's registered baseUrl/apiKey.
-	const api = m.tool_calling === false ? OMNI_PROMPT_TOOLS_API : "openai-completions";
 	return {
 		id: m.id,
 		name: m.name,
-		api,
+		api: PROVIDER_API,
 		reasoning: m.reasoning ?? false,
 		input: m.input ?? ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -364,7 +363,7 @@ function buildAutoModel(id: string): ProviderModelConfig {
 	return {
 		id,
 		name: id,
-		api: "openai-completions",
+		api: PROVIDER_API,
 		reasoning: id === "auto/coding" || id === "auto/smart",
 		input: ["text", "image"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -385,7 +384,7 @@ function buildProviderEntry(config: OmniConfig, models: ProviderModelConfig[]): 
 		name: "OmniRoute",
 		baseUrl: `${config.serverUrl}/v1`,
 		apiKey: config.apiKey || "omniroute-public",
-		api: OMNI_PROMPT_TOOLS_API,
+		api: PROVIDER_API,
 		authHeader: true,
 		models,
 	};
@@ -1043,10 +1042,9 @@ export async function createOmniExtension(pi: OmniPI, opts: AgentHomeOptions): P
 	}
 
 	function streamOmni(model: Model<any>, context: Context, options?: SimpleStreamOptions): OmniEventStream {
-		// Only called for omni-prompt-tools models (chat-only/web, ~2%).
-		// Native tool models carry api:"openai-completions" and are routed by
-		// the host's built-in handler — this function is never called for them.
-		// shouldUsePromptTools guard keeps backward-compat for old models.json.
+		// Called for every OmniRoute model. Routes internally: chat-only/web
+		// models get the prompt-tool text protocol; native tool models get a
+		// direct non-streaming HTTP call with OpenAI tool_calls support.
 		if (shouldUsePromptTools(model)) return streamWithPromptTools(config, model, context, options);
 		return streamNativeTools(config, model, context, options);
 	}
