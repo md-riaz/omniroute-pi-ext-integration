@@ -921,10 +921,9 @@ function streamWithPromptTools(config: OmniConfig, model: Model<any>, context: C
 }
 
 /**
- * Handles native-tool models via direct HTTP when they are still registered
- * under the "omni-prompt-tools" API (e.g. from a pre-upgrade models.json).
- * After /omni sync, native models get api:"openai-completions" and the host
- * routes them through its built-in handler without calling this function.
+ * Handles native-tool models via SSE streaming (stream:true).
+ * Parses OpenAI-compatible SSE chunks and emits host stream events in real-time
+ * so the user sees token-by-token output just like any built-in provider.
  */
 function streamNativeTools(config: OmniConfig, model: Model<any>, context: Context, options?: SimpleStreamOptions): OmniEventStream {
 	const stream = new OmniEventStream();
@@ -956,7 +955,8 @@ function streamNativeTools(config: OmniConfig, model: Model<any>, context: Conte
 			const body: Record<string, unknown> = {
 				model: model.id,
 				messages: buildOpenAIMessages(innerContext),
-				stream: false,
+				stream: true,
+				stream_options: { include_usage: true },
 			};
 			if ((context.tools ?? []).length > 0) {
 				body.tools = (context.tools ?? []).map((t) => ({
@@ -969,36 +969,103 @@ function streamNativeTools(config: OmniConfig, model: Model<any>, context: Conte
 				}));
 			}
 
-			const data = await requestChatJson(config, body, options?.signal);
-			output.usage = parseUsage(data?.usage);
-			output.responseModel = data?.model;
+			const res = await fetch(`${config.serverUrl}/v1/chat/completions`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", ...authHeaders(config) },
+				body: JSON.stringify(body),
+				signal: options?.signal ?? AbortSignal.timeout(120_000),
+			});
 
-			const choice = data?.choices?.[0];
-			const finishReason = choice?.finish_reason ?? "stop";
-
-			const rawText: string = choice?.message?.content ?? "";
-			if (rawText) {
-				output.content.push({ type: "text", text: rawText });
-				const idx = output.content.length - 1;
-				stream.push({ type: "text_start", contentIndex: idx, partial: output });
-				stream.push({ type: "text_delta", contentIndex: idx, delta: rawText, partial: output });
-				stream.push({ type: "text_end", contentIndex: idx, content: rawText, partial: output });
+			if (!res.ok) {
+				const text = await res.text();
+				throw Object.assign(new Error(`${res.status}: ${text || res.statusText}`), { status: res.status });
 			}
 
-			const nativeCalls: any[] = choice?.message?.tool_calls ?? [];
-			for (const tc of nativeCalls) {
+			const reader = res.body!.getReader();
+			const decoder = new TextDecoder();
+			let buf = "";
+			let textStarted = false;
+			let textIdx = -1;
+			let accText = "";
+			// Per-index tool call accumulator: index → { id, name, argStr, contentIdx }
+			const toolAcc = new Map<number, { id: string; name: string; argStr: string; contentIdx: number }>();
+			let finishReason = "stop";
+
+			outer: while (true) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				buf += decoder.decode(value, { stream: true });
+
+				const lines = buf.split("\n");
+				buf = lines.pop()!;
+
+				for (const line of lines) {
+					const raw = line.trim();
+					if (!raw.startsWith("data:")) continue;
+					const payload = raw.slice(5).trim();
+					if (payload === "[DONE]") break outer;
+
+					let chunk: any;
+					try { chunk = JSON.parse(payload); } catch { continue; }
+
+					if (chunk.usage) output.usage = parseUsage(chunk.usage);
+					output.responseModel ??= chunk.model;
+
+					const choice = chunk.choices?.[0];
+					if (!choice) continue;
+					const delta = choice.delta ?? {};
+
+					// Text content
+					if (typeof delta.content === "string" && delta.content) {
+						if (!textStarted) {
+							textIdx = output.content.length;
+							output.content.push({ type: "text", text: "" } as TextContent);
+							stream.push({ type: "text_start", contentIndex: textIdx, partial: output });
+							textStarted = true;
+						}
+						accText += delta.content;
+						(output.content[textIdx] as TextContent).text = accText;
+						stream.push({ type: "text_delta", contentIndex: textIdx, delta: delta.content, partial: output });
+					}
+
+					// Tool call deltas
+					for (const tc of delta.tool_calls ?? []) {
+						const i: number = tc.index ?? 0;
+						if (!toolAcc.has(i)) {
+							const contentIdx = output.content.length;
+							output.content.push({ type: "toolCall", id: tc.id ?? "", name: tc.function?.name ?? "", arguments: {} } as ToolCall);
+							toolAcc.set(i, { id: tc.id ?? "", name: tc.function?.name ?? "", argStr: "", contentIdx });
+							stream.push({ type: "toolcall_start", contentIndex: contentIdx, partial: output });
+						}
+						const acc = toolAcc.get(i)!;
+						if (tc.id && !acc.id) acc.id = tc.id;
+						if (tc.function?.name && !acc.name) acc.name = tc.function.name;
+						const argChunk: string = tc.function?.arguments ?? "";
+						if (argChunk) {
+							acc.argStr += argChunk;
+							stream.push({ type: "toolcall_delta", contentIndex: acc.contentIdx, delta: argChunk, partial: output });
+						}
+					}
+
+					if (choice.finish_reason) finishReason = choice.finish_reason;
+				}
+			}
+
+			// Finalise text
+			if (textStarted) {
+				stream.push({ type: "text_end", contentIndex: textIdx, content: accText, partial: output });
+			}
+
+			// Finalise tool calls
+			for (const [, acc] of toolAcc) {
 				let args: Record<string, any> = {};
-				try { args = JSON.parse(tc.function?.arguments ?? "{}"); } catch {}
-				const id = tc.id ?? `call_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-				const toolCall: ToolCall = { type: "toolCall", id, name: tc.function?.name ?? "", arguments: args };
-				output.content.push(toolCall);
-				const idx = output.content.length - 1;
-				stream.push({ type: "toolcall_start", contentIndex: idx, partial: output });
-				stream.push({ type: "toolcall_delta", contentIndex: idx, delta: JSON.stringify(args), partial: output });
-				stream.push({ type: "toolcall_end", contentIndex: idx, toolCall, partial: output });
+				try { args = JSON.parse(acc.argStr); } catch {}
+				const toolCall: ToolCall = { type: "toolCall", id: acc.id, name: acc.name, arguments: args };
+				output.content[acc.contentIdx] = toolCall;
+				stream.push({ type: "toolcall_end", contentIndex: acc.contentIdx, toolCall, partial: output });
 			}
 
-			output.stopReason = finishReason === "tool_calls" || nativeCalls.length > 0 ? "toolUse"
+			output.stopReason = finishReason === "tool_calls" || toolAcc.size > 0 ? "toolUse"
 				: finishReason === "length" ? "length"
 				: "stop";
 			stream.push({ type: "done", reason: output.stopReason as "stop" | "length" | "toolUse", message: output });
