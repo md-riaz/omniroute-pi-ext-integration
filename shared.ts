@@ -1,21 +1,85 @@
-import {
-	calculateCost,
-	createAssistantMessageEventStream,
-	getApiProvider,
-	type AssistantMessage,
-	type AssistantMessageEventStream,
-	type Context,
-	type Message,
-	type Model,
-	type SimpleStreamOptions,
-	type TextContent,
-	type Tool,
-	type ToolCall,
-} from "@earendil-works/pi-ai";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import * as Typebox from "typebox/type";
+
+// ─── Local types (no host package imports needed) ─────────────────────────────
+type TextContent = { type: "text"; text: string };
+type ToolCall = { type: "toolCall"; id: string; name: string; arguments: Record<string, any> };
+type Tool = { name: string; description?: string; parameters?: any };
+type Model<_T = any> = { id: string; name?: string; provider: string; api?: string };
+type Context = { systemPrompt?: string; messages: any[]; tools?: Tool[] };
+type SimpleStreamOptions = { sessionId?: string; signal?: AbortSignal; [k: string]: any };
+type Message = any;
+
+type AssistantMessage = {
+	role: "assistant";
+	content: any[];
+	api?: string;
+	provider?: string;
+	model?: string;
+	usage: {
+		input: number;
+		output: number;
+		cacheRead: number;
+		cacheWrite: number;
+		totalTokens: number;
+		cost: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
+	};
+	stopReason: string;
+	errorMessage?: string;
+	responseId?: string;
+	responseModel?: string;
+	timestamp: number;
+};
+
+/**
+ * Minimal async event stream compatible with the AssistantMessageEventStream
+ * contract expected by both @earendil-works and @oh-my-pi extension hosts.
+ */
+class OmniEventStream {
+	private _queue: any[] = [];
+	private _waiters: Array<(v: IteratorResult<any>) => void> = [];
+	private _done = false;
+	private _resolve!: (msg: AssistantMessage) => void;
+	private _reject!: (err: unknown) => void;
+	readonly result: Promise<AssistantMessage>;
+
+	constructor() {
+		this.result = new Promise<AssistantMessage>((resolve, reject) => {
+			this._resolve = resolve;
+			this._reject = reject;
+		});
+	}
+
+	push(event: any): void {
+		if (event.type === "done") this._resolve(event.message as AssistantMessage);
+		else if (event.type === "error") this._reject(new Error(event.reason ?? "stream error"));
+		if (this._waiters.length > 0) {
+			this._waiters.shift()!({ value: event, done: false });
+		} else {
+			this._queue.push(event);
+		}
+	}
+
+	end(): void {
+		this._done = true;
+		for (const w of this._waiters) w({ value: undefined as any, done: true });
+		this._waiters = [];
+	}
+
+	[Symbol.asyncIterator](): AsyncIterator<any> {
+		return {
+			next: (): Promise<IteratorResult<any>> => {
+				if (this._queue.length > 0) return Promise.resolve({ value: this._queue.shift()!, done: false });
+				if (this._done) return Promise.resolve({ value: undefined as any, done: true });
+				return new Promise(resolve => this._waiters.push(resolve));
+			},
+		};
+	}
+}
+
+type AssistantMessageEventStream = OmniEventStream;
 
 // ─── Local CLI interface — no import from either CLI package ──────────────────
 interface OmniPI {
@@ -280,10 +344,14 @@ async function fetchSyncedModels(config: OmniConfig): Promise<SyncedModel[]> {
 }
 
 function buildProviderModelConfig(m: SyncedModel): ProviderModelConfig {
+	// Prompt-tool (chat-only) models use our custom streamSimple handler.
+	// Native tool models use the host's built-in openai-completions handler
+	// via the provider's baseUrl — no custom streamSimple needed.
+	const api = m.tool_calling === false ? OMNI_PROMPT_TOOLS_API : "openai-completions";
 	return {
 		id: m.id,
 		name: m.name,
-		api: OMNI_PROMPT_TOOLS_API,
+		api,
 		reasoning: m.reasoning ?? false,
 		input: m.input ?? ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -296,7 +364,7 @@ function buildAutoModel(id: string): ProviderModelConfig {
 	return {
 		id,
 		name: id,
-		api: OMNI_PROMPT_TOOLS_API,
+		api: "openai-completions",
 		reasoning: id === "auto/coding" || id === "auto/smart",
 		input: ["text", "image"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -458,6 +526,49 @@ async function testChat(config: OmniConfig, model: string): Promise<string> {
 	);
 	const content = data?.choices?.[0]?.message?.content;
 	return typeof content === "string" ? content.trim() : JSON.stringify(data).slice(0, 200);
+}
+
+// ─── Chat HTTP helper ─────────────────────────────────────────────────────────
+/**
+ * Non-streaming POST /v1/chat/completions. Used by streamWithPromptTools and
+ * streamNativeTools in place of delegating to the host's openai-completions
+ * provider — which requires importing host-internal packages that are not
+ * safely importable from an extension's own module context.
+ */
+async function requestChatJson(
+	config: OmniConfig,
+	body: Record<string, unknown>,
+	signal?: AbortSignal,
+): Promise<any> {
+	const res = await fetch(`${config.serverUrl}/v1/chat/completions`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json", ...authHeaders(config) },
+		body: JSON.stringify(body),
+		signal: signal ?? AbortSignal.timeout(120_000),
+	});
+	const text = await res.text();
+	if (!res.ok) throw Object.assign(new Error(`${res.status}: ${text || res.statusText}`), { status: res.status });
+	return text ? JSON.parse(text) : {};
+}
+
+function buildOpenAIMessages(ctx: Context): any[] {
+	const out: any[] = [];
+	if (ctx.systemPrompt) out.push({ role: "system", content: ctx.systemPrompt });
+	for (const m of ctx.messages) {
+		out.push({ role: m.role, content: textOf(m.content) || "" });
+	}
+	return out;
+}
+
+function parseUsage(raw: any): AssistantMessage["usage"] {
+	return {
+		input: raw?.prompt_tokens ?? 0,
+		output: raw?.completion_tokens ?? 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: raw?.total_tokens ?? 0,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
 }
 
 // ─── Prompt-tool system ───────────────────────────────────────────────────────
@@ -626,7 +737,7 @@ function flattenMessages(messages: FlattenableMessage[]): Message[] {
 		} else if (msg.role === "assistant") {
 			const prose = textOf(msg.content);
 			const calls = Array.isArray(msg.content)
-				? msg.content.filter((c): c is ToolCall => c.type === "toolCall")
+				? msg.content.filter((c: any): c is ToolCall => c.type === "toolCall")
 				: [];
 			pushText("assistant", [prose, ...calls.map(renderToolCallBlock)].filter((s) => s.trim()).join("\n\n"));
 		} else if ((msg as any).role === "toolResult") {
@@ -700,8 +811,8 @@ function parseToolCalls(text: string): ParseToolCallsResult {
 	return { prose: "", calls, errors, mixedToolCallText: false };
 }
 
-function streamWithPromptTools(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
-	const stream = createAssistantMessageEventStream();
+function streamWithPromptTools(config: OmniConfig, model: Model<any>, context: Context, options?: SimpleStreamOptions): OmniEventStream {
+	const stream = new OmniEventStream();
 
 	(async () => {
 		const output: AssistantMessage = {
@@ -736,25 +847,29 @@ function streamWithPromptTools(model: Model<any>, context: Context, options?: Si
 				tools: [],
 			};
 
-			const provider = getApiProvider(UNDERLYING_API);
-			if (!provider) throw new Error(`Underlying api "${UNDERLYING_API}" is not registered`);
+			// Direct non-streaming HTTP call — avoids importing host-internal packages
+			// (getApiProvider / createAssistantMessageEventStream) that are not safely
+			// resolvable from an extension's own node_modules context.
+			const data = await requestChatJson(
+				config,
+				{ model: model.id, messages: buildOpenAIMessages(innerContext), stream: false },
+				options?.signal,
+			);
 
-			const inner = provider.streamSimple({ ...model, api: UNDERLYING_API }, innerContext, options);
-			const innerResult = await inner.result();
+			output.usage = parseUsage(data?.usage);
+			output.responseModel = data?.model;
 
-			output.usage = { ...innerResult.usage };
-			output.responseId = innerResult.responseId;
-			output.responseModel = innerResult.responseModel;
-
-			if (innerResult.stopReason === "error" || innerResult.stopReason === "aborted") {
-				output.stopReason = innerResult.stopReason;
-				output.errorMessage = innerResult.errorMessage;
+			const choice = data?.choices?.[0];
+			const finishReason = choice?.finish_reason ?? "stop";
+			if (finishReason === "error" || finishReason === "aborted") {
+				output.stopReason = finishReason;
+				output.errorMessage = choice?.message?.content ?? finishReason;
 				stream.push({ type: "error", reason: output.stopReason, error: output });
 				stream.end();
 				return;
 			}
 
-			const rawText = textOf(innerResult.content as TextContent[]);
+			const rawText: string = choice?.message?.content ?? "";
 			const parsed = tools.length > 0
 				? parseToolCalls(rawText)
 				: { prose: rawText, calls: [], errors: [] as string[], mixedToolCallText: false };
@@ -792,7 +907,101 @@ function streamWithPromptTools(model: Model<any>, context: Context, options?: Si
 			});
 
 			output.stopReason = parsed.calls.length > 0 ? "toolUse" : "stop";
-			calculateCost(model, output.usage);
+			// OmniRoute models have cost: 0 — no calculateCost() import needed.
+			stream.push({ type: "done", reason: output.stopReason as "stop" | "length" | "toolUse", message: output });
+			stream.end();
+		} catch (error) {
+			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
+			output.errorMessage = error instanceof Error ? error.message : String(error);
+			stream.push({ type: "error", reason: output.stopReason, error: output });
+			stream.end();
+		}
+	})();
+
+	return stream;
+}
+
+/**
+ * Handles native-tool models via direct HTTP when they are still registered
+ * under the "omni-prompt-tools" API (e.g. from a pre-upgrade models.json).
+ * After /omni sync, native models get api:"openai-completions" and the host
+ * routes them through its built-in handler without calling this function.
+ */
+function streamNativeTools(config: OmniConfig, model: Model<any>, context: Context, options?: SimpleStreamOptions): OmniEventStream {
+	const stream = new OmniEventStream();
+
+	(async () => {
+		const output: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+
+		try {
+			stream.push({ type: "start", partial: output });
+
+			const flatMsgs = flattenMessages(context.messages);
+			const innerContext: Context = { ...context, messages: flatMsgs };
+			const body: Record<string, unknown> = {
+				model: model.id,
+				messages: buildOpenAIMessages(innerContext),
+				stream: false,
+			};
+			if ((context.tools ?? []).length > 0) {
+				body.tools = (context.tools ?? []).map((t) => ({
+					type: "function",
+					function: {
+						name: t.name,
+						description: t.description ?? "",
+						parameters: t.parameters ?? { type: "object", properties: {} },
+					},
+				}));
+			}
+
+			const data = await requestChatJson(config, body, options?.signal);
+			output.usage = parseUsage(data?.usage);
+			output.responseModel = data?.model;
+
+			const choice = data?.choices?.[0];
+			const finishReason = choice?.finish_reason ?? "stop";
+
+			const rawText: string = choice?.message?.content ?? "";
+			if (rawText) {
+				output.content.push({ type: "text", text: rawText });
+				const idx = output.content.length - 1;
+				stream.push({ type: "text_start", contentIndex: idx, partial: output });
+				stream.push({ type: "text_delta", contentIndex: idx, delta: rawText, partial: output });
+				stream.push({ type: "text_end", contentIndex: idx, content: rawText, partial: output });
+			}
+
+			const nativeCalls: any[] = choice?.message?.tool_calls ?? [];
+			for (const tc of nativeCalls) {
+				let args: Record<string, any> = {};
+				try { args = JSON.parse(tc.function?.arguments ?? "{}"); } catch {}
+				const id = tc.id ?? `call_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+				const toolCall: ToolCall = { type: "toolCall", id, name: tc.function?.name ?? "", arguments: args };
+				output.content.push(toolCall);
+				const idx = output.content.length - 1;
+				stream.push({ type: "toolcall_start", contentIndex: idx, partial: output });
+				stream.push({ type: "toolcall_delta", contentIndex: idx, delta: JSON.stringify(args), partial: output });
+				stream.push({ type: "toolcall_end", contentIndex: idx, toolCall, partial: output });
+			}
+
+			output.stopReason = finishReason === "tool_calls" || nativeCalls.length > 0 ? "toolUse"
+				: finishReason === "length" ? "length"
+				: "stop";
 			stream.push({ type: "done", reason: output.stopReason as "stop" | "length" | "toolUse", message: output });
 			stream.end();
 		} catch (error) {
@@ -833,11 +1042,14 @@ export async function createOmniExtension(pi: OmniPI, opts: AgentHomeOptions): P
 		);
 	}
 
-	function streamOmni(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
-		if (shouldUsePromptTools(model)) return streamWithPromptTools(model, context, options);
-		const provider = getApiProvider(UNDERLYING_API);
-		if (!provider) throw new Error(`Underlying api "${UNDERLYING_API}" is not registered`);
-		return provider.streamSimple({ ...model, api: UNDERLYING_API }, context, options);
+	function streamOmni(model: Model<any>, context: Context, options?: SimpleStreamOptions): OmniEventStream {
+		// Our streamSimple is only registered for "omni-prompt-tools" API models.
+		// After /omni sync, native models have api:"openai-completions" and are
+		// handled directly by the host — this function is never called for them.
+		// For backward compat (old models.json with all models as omni-prompt-tools),
+		// we fall back to HTTP-based native tool handling.
+		if (shouldUsePromptTools(model)) return streamWithPromptTools(config, model, context, options);
+		return streamNativeTools(config, model, context, options);
 	}
 
 	async function sync(ctx?: any): Promise<number> {

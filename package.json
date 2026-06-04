@@ -1,6 +1,6 @@
 {
   "name": "omniroute-agent-extension",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "OmniRoute extension for Pi Coding Agent (pi) and Oh My Pi (omp) — model sync and prompt-tool fallback for chat-only models",
   "keywords": [
     "omp-plugin",
@@ -46,7 +46,7 @@
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.60.0",
-    "@oh-my-pi/pi-coding-agent": ">=0.60.0"
+    "@oh-my-pi/pi-coding-agent": ">=15.9.0"
   },
   "peerDependenciesMeta": {
     "@oh-my-pi/pi-coding-agent": {
