@@ -344,14 +344,10 @@ async function fetchSyncedModels(config: OmniConfig): Promise<SyncedModel[]> {
 }
 
 function buildProviderModelConfig(m: SyncedModel): ProviderModelConfig {
-	// Prompt-tool (chat-only) models use our custom streamSimple handler.
-	// Native tool models use the host's built-in openai-completions handler
-	// via the provider's baseUrl — no custom streamSimple needed.
-	const api = m.tool_calling === false ? OMNI_PROMPT_TOOLS_API : "openai-completions";
 	return {
 		id: m.id,
 		name: m.name,
-		api,
+		api: OMNI_PROMPT_TOOLS_API,
 		reasoning: m.reasoning ?? false,
 		input: m.input ?? ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -364,7 +360,7 @@ function buildAutoModel(id: string): ProviderModelConfig {
 	return {
 		id,
 		name: id,
-		api: "openai-completions",
+		api: OMNI_PROMPT_TOOLS_API,
 		reasoning: id === "auto/coding" || id === "auto/smart",
 		input: ["text", "image"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -1043,11 +1039,9 @@ export async function createOmniExtension(pi: OmniPI, opts: AgentHomeOptions): P
 	}
 
 	function streamOmni(model: Model<any>, context: Context, options?: SimpleStreamOptions): OmniEventStream {
-		// Our streamSimple is only registered for "omni-prompt-tools" API models.
-		// After /omni sync, native models have api:"openai-completions" and are
-		// handled directly by the host — this function is never called for them.
-		// For backward compat (old models.json with all models as omni-prompt-tools),
-		// we fall back to HTTP-based native tool handling.
+		// All OmniRoute models are registered under "omni-prompt-tools" so this
+		// streamSimple is always called. Route to prompt-tool emulation for
+		// chat-only/web models, or direct HTTP with native tool_calls for the rest.
 		if (shouldUsePromptTools(model)) return streamWithPromptTools(config, model, context, options);
 		return streamNativeTools(config, model, context, options);
 	}
