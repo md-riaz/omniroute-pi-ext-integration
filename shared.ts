@@ -1,7 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import * as Typebox from "typebox/type";
 
 // ─── Local CLI interface — no import from either CLI package ──────────────────
 interface OmniPI {
@@ -475,7 +474,7 @@ export async function createOmniExtension(pi: OmniPI, opts: AgentHomeOptions): P
 		name: "omniroute_status",
 		label: "OmniRoute Status",
 		description: "Return OmniRoute health and provider registration status.",
-		parameters: Typebox.Object({}),
+		parameters: { type: "object", properties: {} },
 		async execute(_id: string, _params: any) {
 			const cfg = loadConfig(agentHome);
 			const ok = await checkHealth(cfg);
@@ -496,7 +495,7 @@ export async function createOmniExtension(pi: OmniPI, opts: AgentHomeOptions): P
 		name: "omniroute_sync",
 		label: "OmniRoute Sync",
 		description: "Fetch /v1/models from OmniRoute and register them as a provider.",
-		parameters: Typebox.Object({}),
+		parameters: { type: "object", properties: {} },
 		async execute(_id: string, _params: any) {
 			const cfg = loadConfig(agentHome);
 			const models = await registerOmniProvider(pi, agentHome, cfg);
