@@ -39,6 +39,8 @@ pi install omniroute-agent-extension
 pi install git:github.com/md-riaz/omniroute-agent-extension
 ```
 
+When replacing the earlier Pi-only `omniroute-pi-ext-integration`, existing `omni` catalog entries are normalized automatically on first load. Run `/omni sync` afterward to refresh the catalog from the server.
+
 ## Getting Started
 
 1. Start your CLI (`pi` or `omp`)

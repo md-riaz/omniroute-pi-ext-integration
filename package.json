@@ -1,7 +1,7 @@
 {
   "name": "omniroute-agent-extension",
   "version": "3.1.0",
-  "description": "OmniRoute extension for Pi Coding Agent (pi) and Oh My Pi (omp) — model sync and prompt-tool fallback for chat-only models",
+  "description": "OmniRoute extension for Pi Coding Agent (pi) and Oh My Pi (omp) — model sync, health checks, and native host routing",
   "keywords": [
     "omp-plugin",
     "oh-my-pi",
@@ -31,7 +31,8 @@
     ]
   },
   "scripts": {
-    "typecheck": "tsc --noEmit --allowImportingTsExtensions --target ES2022 --module NodeNext --moduleResolution NodeNext --skipLibCheck --types node shared.ts omp.ts pi.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test test/*.test.ts",
     "smoke": "node --experimental-strip-types -e \"import('./omp.ts').then(()=>console.log('omp ok')).catch(e=>{console.error(e);process.exit(1)})\" && node --experimental-strip-types -e \"import('./pi.ts').then(()=>console.log('pi ok')).catch(e=>{console.error(e);process.exit(1)})\""
   },
   "author": "md-riaz",

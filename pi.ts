@@ -1,7 +1,6 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createOmniExtension } from "./shared.ts";
+import { createOmniExtension, type OmniPI } from "./shared.ts";
 
-export default async function (pi: ExtensionAPI): Promise<void> {
+export default async function (pi: OmniPI): Promise<void> {
   await createOmniExtension(pi, {
     homeEnvVar: "PI_HOME",
     defaultHome: "~/.pi/agent",

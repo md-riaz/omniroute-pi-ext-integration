@@ -5,6 +5,7 @@
 ```bash
 npm install
 npm run typecheck
+npm test
 npm run smoke
 ```
 
@@ -12,24 +13,20 @@ npm run smoke
 
 | Command | Purpose |
 |---|---|
-| `npm run typecheck` | Type-check `index.ts` with NodeNext settings. |
-| `npm run smoke` | Import the extension module and verify it loads. |
+| `npm run typecheck` | Type-check both host entrypoints, shared code, and tests with NodeNext settings. |
+| `npm test` | Run the focused Node test suite. |
+| `npm run smoke` | Import both Pi and OMP entrypoints and verify they load. |
 
-## Local Pi Testing
+## Local Testing
 
-From this repo:
-
-```bash
-pi -e ./index.ts
-```
-
-Or install normally:
+Link the checkout into either host:
 
 ```bash
-pi install git:github.com/md-riaz/omniroute-pi-ext-integration
+pi install /absolute/path/to/omniroute-agent-extension
+omp plugin link /absolute/path/to/omniroute-agent-extension
 ```
 
-Then in Pi:
+Then in Pi or OMP:
 
 ```text
 /omni setup
@@ -43,6 +40,7 @@ Run:
 
 ```bash
 npm run typecheck
+npm test
 npm run smoke
 ```
 

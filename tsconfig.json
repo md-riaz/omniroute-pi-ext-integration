@@ -1,0 +1,11 @@
+{
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "skipLibCheck": true,
+    "target": "ES2022",
+    "types": ["node"]
+  },
+  "include": ["shared.ts", "omp.ts", "pi.ts", "test/**/*.ts"]
+}
