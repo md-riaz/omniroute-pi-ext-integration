@@ -3,6 +3,7 @@
     "allowImportingTsExtensions": true,
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
+    "noEmit": true,
     "skipLibCheck": true,
     "target": "ES2022",
     "types": ["node"]

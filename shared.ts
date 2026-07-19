@@ -320,7 +320,7 @@ function reloadProviderFromModelsJson(pi: OmniPI, agentHome: string, config: Omn
 				? provider.models.map((model: any) => ({
 						...model,
 						api: PROVIDER_API,
-						cost: model.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, ...model.cost },
 					}))
 				: provider.models,
 		});

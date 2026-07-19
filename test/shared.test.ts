@@ -19,7 +19,15 @@ test("normalizes legacy Pi catalog API identifiers when reloading models.json", 
           baseUrl: "http://127.0.0.1:20128/v1",
           apiKey: "test-key",
           api: "omni-prompt-tools",
-          models: [{ id: "gpt-test", name: "GPT Test", api: "omni-prompt-tools" }],
+          models: [
+            { id: "gpt-test", name: "GPT Test", api: "omni-prompt-tools" },
+            {
+              id: "gpt-partial-cost",
+              name: "GPT Partial Cost",
+              api: "omni-prompt-tools",
+              cost: { input: 1.25 },
+            },
+          ],
         },
       },
     }),
@@ -44,6 +52,12 @@ test("normalizes legacy Pi catalog API identifiers when reloading models.json", 
     assert.equal(registrations[0].config.models[0].api, "openai-completions");
     assert.deepEqual(registrations[0].config.models[0].cost, {
       input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+    });
+    assert.deepEqual(registrations[0].config.models[1].cost, {
+      input: 1.25,
       output: 0,
       cacheRead: 0,
       cacheWrite: 0,
