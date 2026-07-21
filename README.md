@@ -16,7 +16,8 @@ Connect to your local or remote OmniRoute server and route queries across 44+ LL
 - **Smart sorting** — models grouped by provider prefix, auto-routing models (`auto`, `auto/coding`, etc.) always first.
 - **Health monitoring** — periodic reachability checks with status bar indicators.
 - **Connection log** — every failed or abnormally slow connection attempt is appended as a JSON line to `<agent-home>/<state>/connection.log` for infra debugging; `ms` timings expose server cold starts, error fields include the fetch `cause` (e.g. `ECONNRESET`, `ETIMEDOUT`, TLS errors).
-- **Env overrides** — `OMNIROUTE_URL`, `OMNIROUTE_API_KEY`, `OMNIROUTE_PROVIDER_NAME` skip the setup wizard entirely.
+- **Catalog autosync** — while the harness is running, re-fetch `/v1/models` on session start and on a configurable interval (default 5 minutes). Manual `/omni sync` still works anytime; control with `/omni autosync on|off|<interval>`.
+- **Env overrides** — `OMNIROUTE_URL`, `OMNIROUTE_API_KEY`, and `OMNIROUTE_PROVIDER_NAME` skip the setup wizard entirely. `OMNIROUTE_AUTO_SYNC_INTERVAL_MS` overrides the catalog autosync interval.
 
 ## Installation
 
@@ -46,7 +47,7 @@ When replacing the earlier Pi-only `omniroute-pi-ext-integration`, existing `omn
 
 1. Start your CLI (`pi` or `omp`)
 2. Run `/omni setup` — enter your OmniRoute server URL and API key
-3. Run `/omni sync` — populates the `Ctrl+P` / `/model` picker
+3. Run `/omni sync` — populates the `Ctrl+P` / `/model` picker (optional after first session; catalog autosync also runs on session start)
 4. Select any model with `/model` and start chatting
 
 Config is saved to:
@@ -70,6 +71,7 @@ Synced models are written to `~/.omp/agent/models.json` (or `~/.pi/agent/models.
 | `/omni test <model>` | Smoke-test `/v1/chat/completions` with a specific model |
 | `/omni dashboard` | Show the OmniRoute dashboard URL |
 | `/omni config` | Show config, models.json, and connection log paths with current settings |
+| `/omni autosync [on\|off\|status\|<interval>]` | Enable, disable, or set background catalog discovery (default 5m) |
 | `/omni help` | Show command list |
 
 ## Agent Tools
@@ -107,13 +109,15 @@ auto/cheap   auto/offline   auto/smart   auto/lkgp
 | `OMNIROUTE_URL` | OmniRoute server base URL |
 | `OMNIROUTE_API_KEY` | API key |
 | `OMNIROUTE_PROVIDER_NAME` | Provider name shown in the picker (default: `omni`) |
+| `OMNIROUTE_AUTO_SYNC_INTERVAL_MS` | Background catalog re-fetch interval in milliseconds. `0` disables autosync. Default `300000` (5 minutes). Minimum `60000`. |
 
-When any of these are set, `/omni setup` is not required.
+When `OMNIROUTE_URL`, `OMNIROUTE_API_KEY`, or `OMNIROUTE_PROVIDER_NAME` are set, `/omni setup` is not required.
 
 ## Development
 
 ```bash
 npm run typecheck   # tsc — zero errors expected
+npm test            # Node test suite (legacy catalog + autosync)
 npm run smoke       # import check for omp.ts and pi.ts
 ```
 
@@ -122,6 +126,7 @@ npm run smoke       # import check for omp.ts and pi.ts
 | `shared.ts` | All business logic — no host package imports; works in both `pi` and `omp` |
 | `omp.ts` | Oh My Pi entry point — `OMP_HOME` / `~/.omp/agent` |
 | `pi.ts` | Pi Coding Agent entry point — `PI_HOME` / `~/.pi/agent` |
+| `scripts/sync-once.ts` | One-shot catalog sync helper for install/refresh scripts |
 
 ## Requirements
 

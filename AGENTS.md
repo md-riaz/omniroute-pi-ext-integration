@@ -58,6 +58,7 @@ Run:
 
 ```bash
 npm run typecheck
+npm test
 npm run smoke
 ```
 
@@ -67,7 +68,7 @@ If tests cannot run, report exact command and failure.
 
 - Prefer small targeted edits.
 - Keep comments on non-obvious functions.
-- Preserve `/omni setup`, `/omni sync`, `/omni dashboard` behavior unless user asks to change it.
+- Preserve `/omni setup`, `/omni sync`, `/omni dashboard`, `/omni autosync` behavior unless user asks to change it.
 - Keep prompt-tool format and parser docs in sync.
 - If adding files, update `AI.md` file map.
 
@@ -75,7 +76,8 @@ If tests cannot run, report exact command and failure.
 
 | File | Why important |
 |---|---|
-| `index.ts` | Extension implementation. |
+| `shared.ts` | Extension implementation (commands, catalog sync/autosync, provider). |
+| `scripts/sync-once.ts` | One-shot catalog sync helper. |
 | `AI.md` | AI scan guide; update when project structure/function map changes. |
 | `ARCHITECTURE.md` | Data flow and tool routing docs. |
 | `README.md` | User-facing documentation. |

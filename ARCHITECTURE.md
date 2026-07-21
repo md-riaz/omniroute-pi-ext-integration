@@ -53,6 +53,29 @@ Saved provider shape:
   -> re-register omni provider
 ```
 
+## Data Flow: Catalog Autosync
+
+Manual `/omni sync` is unchanged. When catalog autosync is enabled (default 5 minutes; `0` disables):
+
+```text
+session_start (reachable + autosync on)
+  -> sync() fetches /v1/models and re-registers omni
+  -> startAutoSync() sets a background interval
+  -> quiet interval syncs refresh the picker
+  -> notify only when the catalog count changes
+session_shutdown
+  -> stopAutoSync()
+```
+
+Control:
+
+```text
+/omni autosync on|off|status|<ms>|<Ns|Nm|Nh>
+OMNIROUTE_AUTO_SYNC_INTERVAL_MS
+```
+
+`sanitizeAutoSyncIntervalMs()` clamps values below 60s up to 60s. Concurrent syncs share one in-flight promise. `scripts/sync-once.ts` calls `syncOmniModelsForAgentHome()` for one-shot installer refresh.
+
 ## Data Flow: Native Tool Model
 
 ```text
