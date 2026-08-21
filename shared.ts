@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 // ─── Local CLI interface — no import from either CLI package ──────────────────
-interface OmniPI {
+export interface OmniPI {
 	registerProvider(name: string, config: any): void;
 	registerTool(tool: {
 		name: string;
@@ -313,7 +313,17 @@ function reloadProviderFromModelsJson(pi: OmniPI, agentHome: string, config: Omn
 	try {
 		const provider = readModelsJson(agentHome)?.providers?.[config.providerName];
 		if (!provider) return;
-		pi.registerProvider(config.providerName, provider);
+		pi.registerProvider(config.providerName, {
+			...provider,
+			api: PROVIDER_API,
+			models: Array.isArray(provider.models)
+				? provider.models.map((model: any) => ({
+						...model,
+						api: PROVIDER_API,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, ...model.cost },
+					}))
+				: provider.models,
+		});
 	} catch {}
 }
 
