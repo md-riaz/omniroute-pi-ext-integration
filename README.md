@@ -15,6 +15,7 @@ Connect to your local or remote OmniRoute server and route queries across 44+ LL
 - **Native tool calls** — the host's built-in `openai-completions` handler runs every request, so you get real SSE streaming and native `tool_calls` for all models.
 - **Smart sorting** — models grouped by provider prefix, auto-routing models (`auto`, `auto/coding`, etc.) always first.
 - **Health monitoring** — periodic reachability checks with status bar indicators.
+- **Connection log** — every failed or abnormally slow connection attempt is appended as a JSON line to `<agent-home>/<state>/connection.log` for infra debugging; `ms` timings expose server cold starts, error fields include the fetch `cause` (e.g. `ECONNRESET`, `ETIMEDOUT`, TLS errors).
 - **Env overrides** — `OMNIROUTE_URL`, `OMNIROUTE_API_KEY`, `OMNIROUTE_PROVIDER_NAME` skip the setup wizard entirely.
 
 ## Installation
@@ -65,9 +66,10 @@ Synced models are written to `~/.omp/agent/models.json` (or `~/.pi/agent/models.
 | `/omni setup` | Configure server URL and API key interactively |
 | `/omni sync` | Fetch `/v1/models` and register models in the picker |
 | `/omni models [search]` | Browse synced models with optional keyword filter |
+| `/omni log [lines]` | Show recent connection log entries from `connection.log` |
 | `/omni test <model>` | Smoke-test `/v1/chat/completions` with a specific model |
 | `/omni dashboard` | Show the OmniRoute dashboard URL |
-| `/omni config` | Show config and models.json paths with current settings |
+| `/omni config` | Show config, models.json, and connection log paths with current settings |
 | `/omni help` | Show command list |
 
 ## Agent Tools
