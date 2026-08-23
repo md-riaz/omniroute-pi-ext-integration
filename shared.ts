@@ -158,16 +158,23 @@ async function requestJson(config: OmniConfig, path: string, init: RequestInit =
 	return text ? JSON.parse(text) : {};
 }
 
+// The origin can cold-start on the first request after idle (observed >5s
+// via a proxy), so a tight timeout reports a false "unreachable" while real
+// requests succeed. Match requestJson's 10s timeout and retry once: the first
+// attempt warms the origin, the retry then succeeds in the common case.
 async function checkHealth(config: OmniConfig): Promise<boolean> {
-	try {
-		const res = await fetch(`${config.serverUrl}/v1/models`, {
-			headers: authHeaders(config),
-			signal: AbortSignal.timeout(3_000),
-		});
-		return res.ok;
-	} catch {
-		return false;
+	for (let attempt = 0; attempt < 2; attempt++) {
+		try {
+			const res = await fetch(`${config.serverUrl}/v1/models`, {
+				headers: authHeaders(config),
+				signal: AbortSignal.timeout(10_000),
+			});
+			if (res.ok) return true;
+		} catch {
+			// cold start / transient network blip — retry once
+		}
 	}
+	return false;
 }
 
 // ─── Model utilities ──────────────────────────────────────────────────────────
