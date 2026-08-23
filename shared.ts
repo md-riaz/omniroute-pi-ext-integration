@@ -239,6 +239,14 @@ async function checkHealth(agentHome: string, config: OmniConfig, context = "hea
 				signal: AbortSignal.timeout(10_000),
 			});
 			const ms = Date.now() - started;
+			// The health check only needs the status code — release the body
+			// stream (cancel, not read) so the socket/connection is freed
+			// whether this attempt succeeds, fails, or is retried.
+			try {
+				await res.body?.cancel();
+			} catch {
+				// body teardown must never change the health result
+			}
 			if (res.ok) {
 				// log slow successes — the cold-start signal that once caused
 				// false "unreachable" status
