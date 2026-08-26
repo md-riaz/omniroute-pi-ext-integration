@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -101,6 +101,46 @@ function modelsJsonPath(agentHome: string): string {
 	return join(agentHome, "models.json");
 }
 
+// ─── Connection log (text file for infra debugging) ───────────────────────────
+// Every health check and request that fails — and any health check that is
+// abnormally slow — is appended as one JSON line per event, e.g.:
+//   {"time":"...","event":"health","context":"interval","attempt":0,"ok":false,"ms":5194,"server":"https://...","error":"TimeoutError: The operation was aborted due to timeout"}
+// Timings make server-side cold starts / edge latency visible; error fields
+// (incl. fetch cause, e.g. ECONNRESET, ETIMEDOUT, TLS errors) distinguish
+// server problems from local network issues. Capped to keep the file small.
+const CONNECTION_LOG_MAX_BYTES = 256 * 1024;
+const CONNECTION_LOG_MAX_LINES = 1000;
+const CONNECTION_LOG_SLOW_MS = 1_000;
+
+function connectionLogPath(agentHome: string): string {
+	return join(agentHome, EXTENSION_STATE_DIR, "connection.log");
+}
+
+function errorBrief(err: unknown): string {
+	if (!(err instanceof Error)) return String(err);
+	const cause = (err as { cause?: unknown }).cause;
+	const causeMsg = cause instanceof Error ? cause.message : undefined;
+	return [err.name, err.message, causeMsg].filter(Boolean).join(": ");
+}
+
+function appendConnectionLog(agentHome: string, entry: Record<string, unknown>): void {
+	try {
+		const path = connectionLogPath(agentHome);
+		mkdirSync(dirname(path), { recursive: true });
+		writeFileSync(path, JSON.stringify({ time: new Date().toISOString(), ...entry }) + "\n", { flag: "a" });
+		let size = 0;
+		try {
+			size = statSync(path).size;
+		} catch {}
+		if (size > CONNECTION_LOG_MAX_BYTES) {
+			const lines = readFileSync(path, "utf8").split("\n").filter(Boolean);
+			writeFileSync(path, lines.slice(-CONNECTION_LOG_MAX_LINES).join("\n") + "\n");
+		}
+	} catch {
+		// logging must never break normal operation
+	}
+}
+
 // ─── Config I/O ───────────────────────────────────────────────────────────────
 function normalizeServerUrl(value: string): string {
 	let url = value.trim().replace(/\/+$/, "");
@@ -147,27 +187,97 @@ function authHeaders(config: OmniConfig): Record<string, string> {
 	return config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {};
 }
 
-async function requestJson(config: OmniConfig, path: string, init: RequestInit = {}, timeoutMs = 10_000): Promise<any> {
-	const res = await fetch(`${config.serverUrl}${path}`, {
-		...init,
-		headers: { "Content-Type": "application/json", ...authHeaders(config), ...(init.headers ?? {}) },
-		signal: AbortSignal.timeout(timeoutMs),
-	});
+async function requestJson(config: OmniConfig, path: string, init: RequestInit = {}, timeoutMs = 10_000, agentHome?: string): Promise<any> {
+	const started = Date.now();
+	let res: Response;
+	try {
+		res = await fetch(`${config.serverUrl}${path}`, {
+			...init,
+			headers: { "Content-Type": "application/json", ...authHeaders(config), ...(init.headers ?? {}) },
+			signal: AbortSignal.timeout(timeoutMs),
+		});
+	} catch (err) {
+		if (agentHome)
+			appendConnectionLog(agentHome, {
+				event: "request",
+				path,
+				ok: false,
+				timeoutMs,
+				ms: Date.now() - started,
+				server: config.serverUrl,
+				error: errorBrief(err),
+			});
+		throw err;
+	}
 	const text = await res.text();
-	if (!res.ok) throw Object.assign(new Error(`${res.status}: ${text || res.statusText}`), { status: res.status });
+	if (!res.ok) {
+		if (agentHome)
+			appendConnectionLog(agentHome, {
+				event: "request",
+				path,
+				ok: false,
+				ms: Date.now() - started,
+				status: res.status,
+				server: config.serverUrl,
+				error: (text || res.statusText).slice(0, 200),
+			});
+		throw Object.assign(new Error(`${res.status}: ${text || res.statusText}`), { status: res.status });
+	}
 	return text ? JSON.parse(text) : {};
 }
 
-async function checkHealth(config: OmniConfig): Promise<boolean> {
-	try {
-		const res = await fetch(`${config.serverUrl}/v1/models`, {
-			headers: authHeaders(config),
-			signal: AbortSignal.timeout(3_000),
-		});
-		return res.ok;
-	} catch {
-		return false;
+// The origin can cold-start on the first request after idle (observed >5s
+// via a proxy), so a tight timeout reports a false "unreachable" while real
+// requests succeed. Match requestJson's 10s timeout and retry once: the first
+// attempt warms the origin, the retry then succeeds in the common case.
+async function checkHealth(agentHome: string, config: OmniConfig, context = "health"): Promise<boolean> {
+	for (let attempt = 0; attempt < 2; attempt++) {
+		const started = Date.now();
+		try {
+			const res = await fetch(`${config.serverUrl}/v1/models`, {
+				headers: authHeaders(config),
+				signal: AbortSignal.timeout(10_000),
+			});
+			const ms = Date.now() - started;
+			// The health check only needs the status code — release the body
+			// stream (cancel, not read) so the socket/connection is freed
+			// whether this attempt succeeds, fails, or is retried.
+			try {
+				await res.body?.cancel();
+			} catch {
+				// body teardown must never change the health result
+			}
+			if (res.ok) {
+				// log slow successes — the cold-start signal that once caused
+				// false "unreachable" status
+				if (ms > CONNECTION_LOG_SLOW_MS)
+					appendConnectionLog(agentHome, { event: "health", context, attempt, ok: true, ms, server: config.serverUrl });
+				return true;
+			}
+			appendConnectionLog(agentHome, {
+				event: "health",
+				context,
+				attempt,
+				ok: false,
+				ms,
+				status: res.status,
+				server: config.serverUrl,
+				error: (res.statusText || `HTTP ${res.status}`).slice(0, 200),
+			});
+		} catch (err) {
+			appendConnectionLog(agentHome, {
+				event: "health",
+				context,
+				attempt,
+				ok: false,
+				ms: Date.now() - started,
+				server: config.serverUrl,
+				error: errorBrief(err),
+			});
+			// cold start / transient network blip — retry once
+		}
 	}
+	return false;
 }
 
 // ─── Model utilities ──────────────────────────────────────────────────────────
@@ -212,8 +322,8 @@ function sortKey(id: string): string {
 }
 
 // ─── Sync + persistence ───────────────────────────────────────────────────────
-async function fetchSyncedModels(config: OmniConfig): Promise<SyncedModel[]> {
-	const data = await requestJson(config, "/v1/models");
+async function fetchSyncedModels(config: OmniConfig, agentHome?: string): Promise<SyncedModel[]> {
+	const data = await requestJson(config, "/v1/models", {}, 10_000, agentHome);
 	const rawModels: any[] = Array.isArray(data?.data) ? data.data : [];
 	const results: SyncedModel[] = [];
 
@@ -273,8 +383,8 @@ function buildAutoModel(id: string): ProviderModelConfig {
 	};
 }
 
-async function discoverModels(config: OmniConfig): Promise<ProviderModelConfig[]> {
-	const synced = await fetchSyncedModels(config);
+async function discoverModels(config: OmniConfig, agentHome?: string): Promise<ProviderModelConfig[]> {
+	const synced = await fetchSyncedModels(config, agentHome);
 	const syncedIds = new Set(synced.map((m) => m.id));
 	const autoModels = AUTO_MODELS.filter((id) => !syncedIds.has(id)).map(buildAutoModel);
 	return [...autoModels, ...synced.map(buildProviderModelConfig)];
@@ -303,7 +413,7 @@ function persistModelsJson(agentHome: string, config: OmniConfig, models: Provid
 }
 
 async function registerOmniProvider(pi: OmniPI, agentHome: string, config: OmniConfig): Promise<ProviderModelConfig[]> {
-	const models = await discoverModels(config);
+	const models = await discoverModels(config, agentHome);
 	pi.registerProvider(config.providerName, buildProviderEntry(config, models));
 	persistModelsJson(agentHome, config, models);
 	return models;
@@ -363,7 +473,7 @@ function modelLines(models: ProviderModelConfig[], query = "", limit = 80): stri
 }
 
 async function showStatus(ctx: any, agentHome: string, config: OmniConfig): Promise<void> {
-	const ok = await checkHealth(config);
+	const ok = await checkHealth(agentHome, config, "status");
 	const configured = existsSync(configPath(agentHome));
 	ctx.ui.notify(
 		[
@@ -386,6 +496,7 @@ function helpText(): string {
 		"/omni setup            Configure server URL and API key",
 		"/omni sync             Sync models to Ctrl+P / /model picker",
 		"/omni models [search]  Browse models",
+		"/omni log [lines]      Show connection log (default 25)",
 		"/omni test <model>     Smoke-test /v1/chat/completions",
 		"/omni dashboard        Show OmniRoute dashboard URL",
 		"/omni config           Show config paths and current settings",
@@ -406,7 +517,7 @@ async function runSetup(ctx: any, pi: OmniPI, agentHome: string): Promise<OmniCo
 
 	const next = sanitizeConfig({ ...current, serverUrl, apiKey: apiKey || current.apiKey });
 
-	if (!(await checkHealth(next))) {
+	if (!(await checkHealth(agentHome, next, "setup"))) {
 		ctx.ui.notify(`Cannot reach ${next.serverUrl}/v1/models.`, "error");
 		return undefined;
 	}
@@ -418,7 +529,7 @@ async function runSetup(ctx: any, pi: OmniPI, agentHome: string): Promise<OmniCo
 	return next;
 }
 
-async function testChat(config: OmniConfig, model: string): Promise<string> {
+async function testChat(config: OmniConfig, model: string, agentHome?: string): Promise<string> {
 	const data = await requestJson(
 		config,
 		"/v1/chat/completions",
@@ -432,6 +543,7 @@ async function testChat(config: OmniConfig, model: string): Promise<string> {
 			}),
 		},
 		20_000,
+		agentHome,
 	);
 	const content = data?.choices?.[0]?.message?.content;
 	return typeof content === "string" ? content.trim() : JSON.stringify(data).slice(0, 200);
@@ -461,12 +573,12 @@ export async function createOmniExtension(pi: OmniPI, opts: AgentHomeOptions): P
 			ctx.ui.notify("OmniRoute loaded. Run /omni setup to connect.", "warning");
 			return;
 		}
-		const ok = await checkHealth(config);
+		const ok = await checkHealth(agentHome, config, "session_start");
 		ctx.ui.setStatus("omni", ok ? undefined : "OmniRoute unreachable");
 		if (!ok) ctx.ui.notify(`OmniRoute unreachable at ${config.serverUrl}. Run /omni sync after reconnecting.`, "warning");
 		if (healthTimer) clearInterval(healthTimer);
 		healthTimer = setInterval(async () => {
-			ctx.ui.setStatus("omni", (await checkHealth(loadConfig(agentHome))) ? undefined : "OmniRoute unreachable");
+			ctx.ui.setStatus("omni", (await checkHealth(agentHome, loadConfig(agentHome), "interval")) ? undefined : "OmniRoute unreachable");
 		}, 60_000);
 	});
 
@@ -487,7 +599,7 @@ export async function createOmniExtension(pi: OmniPI, opts: AgentHomeOptions): P
 		parameters: { type: "object", properties: {} },
 		async execute(_id: string, _params: any) {
 			const cfg = loadConfig(agentHome);
-			const ok = await checkHealth(cfg);
+			const ok = await checkHealth(agentHome, cfg, "tool");
 			const configured = existsSync(configPath(agentHome));
 			return {
 				content: [
@@ -517,9 +629,9 @@ export async function createOmniExtension(pi: OmniPI, opts: AgentHomeOptions): P
 	});
 
 	pi.registerCommand("omni", {
-		description: "OmniRoute: /omni [setup|sync|models|test|dashboard|config|help]",
+		description: "OmniRoute: /omni [setup|sync|models|test|dashboard|config|log|help]",
 		getArgumentCompletions(prefix: string) {
-			return ["setup", "sync", "models", "test", "dashboard", "config", "help"]
+			return ["setup", "sync", "models", "test", "dashboard", "config", "log", "help"]
 				.filter((v) => v.startsWith(prefix))
 				.map((v) => ({ value: v, label: v }));
 		},
@@ -544,9 +656,23 @@ export async function createOmniExtension(pi: OmniPI, opts: AgentHomeOptions): P
 				}
 
 				if (sub === "models") {
-					const models = await discoverModels(config).catch(() => []);
+					const models = await discoverModels(config, agentHome).catch(() => []);
 					return ctx.ui.notify(
 						[`OmniRoute models (${models.length})`, "", ...modelLines(models, rest.join(" "))].join("\n"),
+						"info",
+					);
+				}
+
+				if (sub === "log") {
+					const n = Math.min(200, Math.max(1, parseInt(rest[0] ?? "25", 10) || 25));
+					const path = connectionLogPath(agentHome);
+					let lines: string[] = [];
+					try {
+						lines = readFileSync(path, "utf8").split("\n").filter(Boolean).slice(-n);
+					} catch {}
+					if (!lines.length) return ctx.ui.notify(`No connection log entries at ${path} yet.`, "info");
+					return ctx.ui.notify(
+						[`OmniRoute connection log (${lines.length} shown, latest first):`, "", ...lines.reverse()].join("\n"),
 						"info",
 					);
 				}
@@ -554,7 +680,7 @@ export async function createOmniExtension(pi: OmniPI, opts: AgentHomeOptions): P
 				if (sub === "test") {
 					const model = rest.join(" ");
 					if (!model) return ctx.ui.notify("Usage: /omni test <model>", "warning");
-					const result = await testChat(config, model);
+					const result = await testChat(config, model, agentHome);
 					return ctx.ui.notify(`Test ${model}: ${result}`, "info");
 				}
 
@@ -567,6 +693,7 @@ export async function createOmniExtension(pi: OmniPI, opts: AgentHomeOptions): P
 						[
 							`Config:   ${configPath(agentHome)}`,
 							`Models:   ${modelsJsonPath(agentHome)}`,
+							`Log:      ${connectionLogPath(agentHome)}`,
 							`Configured: ${existsSync(configPath(agentHome)) ? "yes" : "no"}`,
 							`Server:   ${config.serverUrl}`,
 							`Provider: ${config.providerName}`,
