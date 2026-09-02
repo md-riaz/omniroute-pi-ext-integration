@@ -18,7 +18,11 @@ It does three jobs:
 
 | Path | Purpose |
 |---|---|
-| `index.ts` | Entire extension implementation. Commands, sync, provider registration, prompt-tool fallback. |
+| `shared.ts` | Extension implementation. Commands, catalog sync/autosync, provider registration. |
+| `omp.ts` | Oh My Pi entry point. |
+| `pi.ts` | Pi Coding Agent entry point. |
+| `scripts/sync-once.ts` | One-shot catalog sync helper for install/refresh scripts. |
+| `test/shared.test.ts` | Legacy catalog migration and autosync unit tests. |
 | `README.md` | User-facing install/setup/usage docs. |
 | `package.json` | Pi extension metadata, scripts, dev deps. |
 | `package-lock.json` | Locked npm dependency tree. |
@@ -90,19 +94,15 @@ Prompt tool mode triggers when:
 
 Reason: Pi's runtime `Model` type does not preserve custom fields like `tool_calling`, so the extension re-reads raw `models.json` in `modelConfigToolCallingFalse()`.
 
-## Important Functions In `index.ts`
+## Important Functions In `shared.ts`
 
 Read in this order:
 
-1. `registerOmniProvider()` — registers/refreshes the `omni` provider and model list.
-2. `streamOmni()` — runtime router for native vs prompt tool mode.
-3. `shouldUsePromptTools()` — decides if prompt tool fallback is needed.
-4. `streamWithPromptTools()` — prompt-tool stream implementation.
-5. `renderToolProtocol()` — converts Pi tool schemas into prompt text.
-6. `flattenMessages()` — converts native tool history into text history for chat-only models.
-7. `parseToolCalls()` — parses `<tool_call>` blocks from model output.
-8. `getAllModelsFromOmniRoute()` — fetches `/v1/models` and converts to Pi model entries.
-9. `humanName()` — user-friendly labels for Ctrl+P.
+1. `createOmniExtension()` — registers commands, tools, health checks, and catalog autosync.
+2. `registerOmniProvider()` — registers/refreshes the `omni` provider and model list.
+3. `sanitizeAutoSyncIntervalMs()` — clamps `/omni autosync` and env interval values.
+4. `syncOmniModelsForAgentHome()` — one-shot sync used by `scripts/sync-once.ts`.
+5. `getAllModelsFromOmniRoute()` — fetches `/v1/models` and converts to Pi model entries.
 
 ## Prompt Tool Wire Format
 
@@ -165,19 +165,21 @@ Update `/omni setup` handler near bottom of `index.ts`. Preserve the current ord
 
 ### Change sync behavior
 
-Update `/omni sync` handler and `getAllModelsFromOmniRoute()`.
+Update `/omni sync`, catalog autosync (`startAutoSync` / `sanitizeAutoSyncIntervalMs`), and `getAllModelsFromOmniRoute()`. Keep `/omni autosync` as the user control; do not add a second provider.
 
 ## Test Commands
 
 ```bash
 npm run typecheck
+npm test
 npm run smoke
 ```
 
 Expected smoke output:
 
 ```text
-import ok
+omp ok
+pi ok
 ```
 
 ## Pitfalls
