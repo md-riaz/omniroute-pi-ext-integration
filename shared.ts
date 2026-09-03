@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { registerGatewayTelemetry } from "./telemetry.ts";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -565,6 +566,7 @@ export async function createOmniExtension(pi: OmniPI, opts: AgentHomeOptions): P
 
 	// On load: re-register from existing models.json (no network call)
 	reloadProviderFromModelsJson(pi, agentHome, config);
+	registerGatewayTelemetry(pi);
 
 	pi.on("session_start", async (_event: any, ctx: any) => {
 		config = loadConfig(agentHome);

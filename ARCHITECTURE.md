@@ -53,6 +53,10 @@ Saved provider shape:
   -> re-register omni provider
 ```
 
+## Data Flow: Gateway telemetry
+
+After inference, wrap host fetch for /v1/chat/completions (and /v1/responses, /v1/messages). Read X-OmniRoute-* headers plus usage.tokens_per_second. Never derive tok/s from tokens/latency. On agent_settled, notify and setStatus. Missing fields stay unavailable.
+
 ## Data Flow: Native Tool Model
 
 ```text

@@ -15,6 +15,7 @@
   "type": "module",
   "files": [
     "shared.ts",
+    "telemetry.ts",
     "omp.ts",
     "pi.ts",
     "README.md",

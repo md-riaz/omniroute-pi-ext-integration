@@ -8,5 +8,5 @@
     "target": "ES2022",
     "types": ["node"]
   },
-  "include": ["shared.ts", "omp.ts", "pi.ts", "test/**/*.ts"]
+  "include": ["shared.ts", "telemetry.ts", "omp.ts", "pi.ts", "test/**/*.ts"]
 }
