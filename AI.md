@@ -18,7 +18,8 @@ It does three jobs:
 
 | Path | Purpose |
 |---|---|
-| `index.ts` | Entire extension implementation. Commands, sync, provider registration, prompt-tool fallback. |
+| `shared.ts` | Extension implementation shared by Pi and OMP entrypoints.
+| `telemetry.ts` | Gateway tok/s, cost, routed model/provider parsing. Never invents tok/s from latency. |
 | `README.md` | User-facing install/setup/usage docs. |
 | `package.json` | Pi extension metadata, scripts, dev deps. |
 | `package-lock.json` | Locked npm dependency tree. |
